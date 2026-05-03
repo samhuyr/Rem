@@ -412,6 +412,11 @@ async def handle_ai_message(message, question: str):
 # ==========================================================================
 # EVENTS
 # ==========================================================================
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return  # silently ignore unknown commands
+    raise error
 
 @bot.event
 async def on_ready():
