@@ -66,7 +66,7 @@ def _set_state(guild_id: str, key: str, value):
     state_col.update_one(
         {"guild_id": guild_id, "key": key},
         {"$set": {"guild_id": guild_id, "key": key, "value": value,
-                  "updated_at": datetime.datetime.utcnow()}},
+                  "updated_at": datetime.datetime.now(datetime.UTC)}},
         upsert=True
     )
 
@@ -634,7 +634,7 @@ async def serverinfo(interaction: discord.Interaction):
         )
         embed.add_field(name="📋 Recent Activity", value=activity, inline=False)
 
-    embed.set_footer(text=f"Live data • {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    embed.set_footer(text=f"Live data • {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     await interaction.response.send_message(embed=embed)
 
 
@@ -658,7 +658,7 @@ async def roles_cmd(interaction: discord.Interaction):
         if r["member_count"] > 8:
             names += f" +{r['member_count'] - 8} more"
         embed.add_field(name=f"{r['name']} ({r['member_count']})", value=names, inline=False)
-    embed.set_footer(text=f"Live data • {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    embed.set_footer(text=f"Live data • {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     await interaction.response.send_message(embed=embed)
 
 
@@ -683,7 +683,7 @@ async def members_cmd(interaction: discord.Interaction):
         joined = m["joined_at"].strftime("%b %d") if m.get("joined_at") else "?"
         lines.append(f"**{m['name']}** — {roles_str} *(joined {joined})*")
     embed.description = "\n".join(lines)
-    embed.set_footer(text=f"Live data • {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    embed.set_footer(text=f"Live data • {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     await interaction.response.send_message(embed=embed)
 
 
@@ -704,7 +704,7 @@ async def activity_cmd(interaction: discord.Interaction):
     embed = discord.Embed(title=f"📋 Recent Activity — {interaction.guild.name}", color=BOT_COLOR)
     lines = [f"**#{m['channel']}** {m['author']}: {m['content'][:80]}" for m in reversed(recent)]
     embed.description = "\n".join(lines)
-    embed.set_footer(text=f"Live data • {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    embed.set_footer(text=f"Live data • {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     await interaction.response.send_message(embed=embed)
 
 
