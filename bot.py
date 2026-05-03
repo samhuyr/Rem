@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -5,12 +7,13 @@ import pymongo
 import datetime
 import requests
 import asyncio
+import os
 
 # ===== CONFIG — fill these in =====
-DISCORD_TOKEN = "MTUwMDM0OTk5ODE2MjkwMzI0MA.GFVW6E.UIuCbaCbSWTR87zpQdJK8d_UEKKb5N4a8mVCys"           # Your bot token from Discord Developer Portal
-MONGO_URI = "mongodb+srv://sam:sam%402810@calculator.3hezc4f.mongodb.net/?appName=Calculator"               # Your MongoDB connection string
-DATABASE_NAME = "auramc"     # Name of your MongoDB database
-GROQ_API_KEY = "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"
+DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
+MONGO_URI     = os.environ["MONGO_URI"]
+DATABASE_NAME = os.environ.get("DATABASE_NAME", "auramc")
+GROQ_API_KEY  = os.environ["GROQ_API_KEY"]
 
 # ===== SETTINGS =====
 AI_MODEL = "llama-3.1-8b-instant"
