@@ -710,7 +710,7 @@ async def activity_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="editinfo", description="Update server info (Admin only)")
 @app_commands.describe(key="Field to update e.g. server_ip, version, store, discord_invite", value="New value")
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.checks.has_permissions(manage_guild=True)
 async def editinfo(interaction: discord.Interaction, key: str, value: str):
     if not interaction.guild:
         await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
