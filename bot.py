@@ -35,7 +35,27 @@ messages_col = db["messages"]
 members_col  = db["members"]
 roles_col    = db["roles"]
 channels_col = db["channels"]
-staff_col    = db["server_staff"]   # NEW: stores founder/owner/admin/senior-admin
+staff_col    = db["server_staff"]   # stores founder/owner/admin/senior-admin
+config_col   = db["bot_config"]     # stores global bot settings like developer name
+
+# ===== BOT CONFIG HELPERS =====
+def _get_bot_config(key: str, default: str = "") -> str:
+    doc = config_col.find_one({"key": key})
+    return doc["value"] if doc else default
+
+def _set_bot_config(key: str, value: str):
+    config_col.update_one(
+        {"key": key},
+        {"$set": {"key": key, "value": value,
+                  "updated_at": datetime.datetime.now(datetime.UTC)}},
+        upsert=True
+    )
+
+async def get_bot_config(key: str, default: str = "") -> str:
+    return await asyncio.to_thread(_get_bot_config, key, default)
+
+async def set_bot_config(key: str, value: str):
+    await asyncio.to_thread(_set_bot_config, key, value)
 
 # ===== PLACEHOLDERS CONFIG =====
 # These are all the keys users can edit with !edit or !rem set
@@ -209,6 +229,7 @@ When mentioning channels, always use their Discord mention format like <#channel
 Keep answers concise. Use bullet points • for lists. No filler phrases.
 You have memory of the current conversation — stay on topic and refer back to what was said earlier when relevant.
 IMPORTANT: If anyone asks about your commands, tell them to use `!rem help` or `!rem list all` to see the real command list. Never make up or guess commands.
+You were developed by {_get_bot_config('developer_name', 'Sam (Sam | Dev | Sleepwalker)')}. If anyone asks who made you, who developed you, or who is your creator, always say their name.
 
 === SERVER INFO ===
 - Server Name: {server_name}
@@ -455,6 +476,26 @@ async def on_ready():
     if not full_sync.is_running():
         full_sync.start()
 
+    # ── Send restart complete message if bot was restarted ─────────────────
+    restart_channel_id = await get_bot_config("restart_channel_id")
+    restart_guild_id   = await get_bot_config("restart_guild_id")
+    if restart_channel_id and restart_guild_id:
+        try:
+            guild = bot.get_guild(int(restart_guild_id))
+            if guild:
+                channel = guild.get_channel(int(restart_channel_id))
+                if channel:
+                    embed = discord.Embed(
+                        description="✅ **Restart complete!** I'm back online and fully synced.",
+                        color=discord.Color.green()
+                    )
+                    await channel.send(embed=embed)
+        except Exception as e:
+            print(f"❌ Could not send restart message: {e}")
+        # Clear so it doesn't send again on next normal startup
+        await set_bot_config("restart_channel_id", "")
+        await set_bot_config("restart_guild_id", "")
+
 
 @bot.event
 async def on_message(message):
@@ -472,9 +513,30 @@ async def on_message(message):
         if message.author.id != DEVELOPER_ID:
             await message.reply("❌ You don't have permission to use this command.")
             return
-        await message.reply("🔄 Restarting bot... I'll be back in a few seconds!")
+        # Save channel info so bot can send "back online" message after restart
+        await set_bot_config("restart_channel_id", str(message.channel.id))
+        await set_bot_config("restart_guild_id", str(message.guild.id))
+        await message.reply("🔄 Restarting... I'll be back in a few seconds!")
         print(f"🔄 Restart triggered by {message.author} ({message.author.id})")
-        await bot.close()
+        await asyncio.sleep(1)  # give time for the reply to send
+        os._exit(0)  # force exit so Railway restarts the process
+        return
+
+    # ── !rem setdev <name> (developer only) ───────────────────────────────
+    if content_lower.startswith("!rem setdev "):
+        if message.author.id != DEVELOPER_ID:
+            await message.reply("❌ Only the bot developer can use this command.")
+            return
+        new_name = content[12:].strip()
+        if not new_name:
+            await message.reply("❌ Usage: `!rem setdev <your name>`")
+            return
+        await set_bot_config("developer_name", new_name)
+        embed = discord.Embed(
+            description=f"✅ Developer name updated to: **{new_name}**\nRem will now say she was developed by **{new_name}**.",
+            color=discord.Color.green()
+        )
+        await message.reply(embed=embed)
         return
 
     # ── !placeholders ──────────────────────────────────────────────────────
@@ -538,6 +600,11 @@ async def on_message(message):
             "`/editinfo` — Edit server info *(admin only)*\n"
             "`/setstaff` — Set staff roles *(admin only)*"
         ), inline=False)
+        if message.author.id == DEVELOPER_ID:
+            embed.add_field(name="🔧 Developer Only", value=(
+                "`!restart` — Restart the bot\n"
+                "`!rem setdev <name>` — Change the developer name"
+            ), inline=False)
         embed.set_footer(text=f"Requested by {message.author.display_name}")
         await message.reply(embed=embed)
         return
