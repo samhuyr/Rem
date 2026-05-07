@@ -1,3 +1,4 @@
+
 from dotenv import load_dotenv
 load_dotenv()
 import discord
@@ -9,6 +10,7 @@ import requests
 import asyncio
 import os
 import math
+import time
 
 # ===== CONFIG =====
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
@@ -17,7 +19,7 @@ DATABASE_NAME = os.environ.get("DATABASE_NAME", "auramc")
 GROQ_API_KEY  = os.environ["GROQ_API_KEY"]
 
 # ===== SETTINGS =====
-AI_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+AI_MODEL = "llama-3.1-8b-instant"  # Fast model, rarely rate-limited
 AI_URL = "https://api.groq.com/openai/v1/chat/completions"
 IGNORE_CHANNELS = ["bot-spam", "bot-commands"]
 HISTORY_LIMIT = 25
@@ -356,25 +358,38 @@ Always answer using this real-time data. Be concise and friendly."""
 
 
 def _ask_groq(prompt: str, guild_id: str, history: list, author_id: int = 0) -> str:
-    try:
-        resp = requests.post(AI_URL, json={
-            "model": AI_MODEL,
-            "messages": [
-                {"role": "system", "content": _build_system_prompt(guild_id, author_id)},
-                *history,
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 1024,
-            "temperature": 0.7,
-        }, headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }, timeout=30)
-        if resp.status_code != 200:
-            return f"⚠️ API Error {resp.status_code}: {resp.text[:200]}"
-        return resp.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        return f"⚠️ Error: {e}"
+    payload = {
+        "model": AI_MODEL,
+        "messages": [
+            {"role": "system", "content": _build_system_prompt(guild_id, author_id)},
+            *history,
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 1024,
+        "temperature": 0.7,
+    }
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    for attempt in range(3):
+        try:
+            resp = requests.post(AI_URL, json=payload, headers=headers, timeout=30)
+            if resp.status_code == 429:
+                wait = 5 * (attempt + 1)  # 5s -> 10s -> 15s
+                print(f"⚠️ Groq rate limited (attempt {attempt+1}/3) — waiting {wait}s...")
+                time.sleep(wait)
+                continue
+            if resp.status_code != 200:
+                return f"⚠️ API Error {resp.status_code}: {resp.text[:200]}"
+            return resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"⚠️ _ask_groq exception (attempt {attempt+1}/3): {e}")
+            if attempt < 2:
+                time.sleep(3)
+            else:
+                return f"⚠️ Error: {e}"
+    return "⚠️ I'm being rate limited right now. Please try again in a moment!"
 
 def _sync_server_data(guild):
     try:
