@@ -22,6 +22,11 @@ IGNORE_CHANNELS = ["bot-spam", "bot-commands"]
 HISTORY_LIMIT = 25
 BOT_COLOR = discord.Color.from_str("#5865F2")
 
+# ===== CONVERSATION MEMORY =====
+# { channel_id: [ {role, content}, ... ] }
+conversation_history: dict = {}
+MAX_HISTORY = 10  # number of back-and-forth pairs to remember per channel
+
 # ===== MONGODB SETUP =====
 mongo_client = pymongo.MongoClient(MONGO_URI)
 db = mongo_client[DATABASE_NAME]
@@ -139,6 +144,7 @@ You are helpful, friendly, and always up to date with real-time server data.
 Your name is Rem. Never refer to yourself by any other name.
 When mentioning channels, always use their Discord mention format like <#channel_id>.
 Keep answers concise. Use bullet points â€¢ for lists. No filler phrases.
+You have memory of the current conversation â€” stay on topic and refer back to what was said earlier when relevant.
 
 === SERVER INFO ===
 - Server Name: {server_name}
@@ -170,12 +176,13 @@ Keep answers concise. Use bullet points â€¢ for lists. No filler phrases.
 
 Always answer using this real-time data. Be concise and friendly."""
 
-def _ask_groq(prompt: str, guild_id: str) -> str:
+def _ask_groq(prompt: str, guild_id: str, history: list) -> str:
     try:
         resp = requests.post(AI_URL, json={
             "model": AI_MODEL,
             "messages": [
                 {"role": "system", "content": _build_system_prompt(guild_id)},
+                *history,
                 {"role": "user", "content": prompt}
             ],
             "max_tokens": 1024,
@@ -243,8 +250,7 @@ def _sync_server_data(guild):
         print(f"_sync_server_data error for {guild.name}: {e}")
 
 # ==========================================================================
-# ASYNC WRAPPERS â€” these are what event handlers call.
-# All blocking I/O is offloaded to a thread pool via asyncio.to_thread().
+# ASYNC WRAPPERS
 # ==========================================================================
 
 async def save_message(message):
@@ -262,8 +268,8 @@ async def seed_guild_defaults(guild_id: str, guild_name: str):
 async def sync_server_data(guild):
     await asyncio.to_thread(_sync_server_data, guild)
 
-async def ask_groq(prompt: str, guild_id: str) -> str:
-    return await asyncio.to_thread(_ask_groq, prompt, guild_id)
+async def ask_groq(prompt: str, guild_id: str, history: list) -> str:
+    return await asyncio.to_thread(_ask_groq, prompt, guild_id, history)
 
 async def fetch_channel_history(guild):
     """Fetches message history for all channels in a guild on startup."""
@@ -301,10 +307,23 @@ async def handle_ai_message(message, question: str):
         await message.reply("Hey! Ask me something ðŸ˜Š e.g. `!rem whats the last announcement?`")
         return
 
+    channel_id = str(message.channel.id)
+    guild_id = str(message.guild.id)
+
+    if channel_id not in conversation_history:
+        conversation_history[channel_id] = []
+
+    history = conversation_history[channel_id]
+    context = f"[Asked by: {message.author.display_name} in #{message.channel.name}]\n{question}"
+
     async with message.channel.typing():
-        guild_id = str(message.guild.id)
-        context = f"[Asked by: {message.author.display_name} in #{message.channel.name}]\n{question}"
-        reply = await ask_groq(context, guild_id)
+        reply = await ask_groq(context, guild_id, history)
+
+        history.append({"role": "user", "content": context})
+        history.append({"role": "assistant", "content": reply})
+
+        if len(history) > MAX_HISTORY * 2:
+            conversation_history[channel_id] = history[-(MAX_HISTORY * 2):]
 
         embed = discord.Embed(description=reply[:4000], color=BOT_COLOR)
         embed.set_author(name="Rem", icon_url=bot.user.display_avatar.url if bot.user.display_avatar else None)
@@ -318,7 +337,7 @@ async def handle_ai_message(message, question: str):
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
-        return  # silently ignore unknown commands
+        return
     raise error
 
 @bot.event
@@ -338,7 +357,6 @@ async def on_ready():
         await sync_server_data(guild)
         await fetch_channel_history(guild)
 
-        # Seed presence from current member statuses
         for member in guild.members:
             if not member.bot:
                 if guild_id not in presence_cache:
@@ -390,7 +408,7 @@ async def on_member_join(member):
         {"$set": {"name": member.display_name, "username": str(member.name),
                   "roles": [], "joined_at": member.joined_at, "bot": member.bot,
                   "guild_id": guild_id, "user_id": str(member.id)}},
-        True  # upsert
+        True
     )
     await set_state(guild_id, "total_members", str(member.guild.member_count))
 
@@ -411,7 +429,7 @@ async def on_member_update(before, after):
             "roles": [r.name for r in after.roles if r.name != "@everyone"],
             "name": after.display_name
         }},
-        True  # upsert
+        True
     )
     for role in after.guild.roles:
         if role.name == "@everyone":
@@ -420,7 +438,7 @@ async def on_member_update(before, after):
         await asyncio.to_thread(roles_col.update_one,
             {"name": role.name, "guild_id": guild_id},
             {"$set": {"members": role_members[:50], "member_count": len(role_members)}},
-            True  # upsert
+            True
         )
 
 
@@ -446,7 +464,7 @@ async def on_guild_channel_create(channel):
         {"channel_id": str(channel.id)},
         {"$set": {"channel_id": str(channel.id), "name": channel.name,
                   "type": str(channel.type), "guild_id": guild_id}},
-        True  # upsert
+        True
     )
     await set_state(guild_id, "total_channels", str(len(channel.guild.channels)))
 
@@ -496,10 +514,21 @@ async def rem_cmd(interaction: discord.Interaction, question: str):
         return
 
     guild_id = str(interaction.guild.id)
+    channel_id = str(interaction.channel_id)
     await seed_guild_defaults(guild_id, interaction.guild.name)
 
+    if channel_id not in conversation_history:
+        conversation_history[channel_id] = []
+
+    history = conversation_history[channel_id]
     context = f"[Asked by: {interaction.user.display_name}]\n{question}"
-    reply = await ask_groq(context, guild_id)
+    reply = await ask_groq(context, guild_id, history)
+
+    history.append({"role": "user", "content": context})
+    history.append({"role": "assistant", "content": reply})
+
+    if len(history) > MAX_HISTORY * 2:
+        conversation_history[channel_id] = history[-(MAX_HISTORY * 2):]
 
     embed = discord.Embed(description=reply[:4000], color=BOT_COLOR)
     embed.set_author(name="Rem", icon_url=bot.user.display_avatar.url if bot.user.display_avatar else None)
