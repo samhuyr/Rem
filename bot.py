@@ -285,9 +285,12 @@ You have memory of the current conversation — stay on topic and refer back to 
 IMPORTANT: If anyone asks about your commands, tell them to use `!rem help` or `!rem list all` to see the real command list. Never make up or guess commands.
 You were developed by {_get_bot_config('developer_name', 'Sam (Sam | Dev | Sleepwalker)')}. If anyone asks who made you, who developed you, or who is your creator, always say their name.
 
-CRITICAL: You have been given the COMPLETE list of ALL {len(channels)} text channels and ALL {len(roles)} roles below.
-Do NOT say you need to fetch more data. Do NOT say the list is incomplete. Everything is already provided.
-If asked to list all channels or roles, list every single one shown below — do not skip any or say there are more.
+CRITICAL REDIRECT RULES — follow these exactly:
+- If someone asks to LIST or SHOW ALL channels → reply ONLY: "Use `/roles` to see all roles with members, or check the channel list on the left sidebar! 📋"
+- If someone asks to LIST or SHOW ALL roles → reply ONLY: "Use `/roles` to browse all roles with a clean paginated view! 🏷️"
+- If someone asks to LIST or SHOW ALL members → reply ONLY: "Use `/members` to see recent members with their roles! 👥"
+- NEVER dump a raw list of channels or roles in chat. Always redirect to the slash command.
+- You MAY answer specific questions like "what channel is for announcements?" or "how many roles are there?" using the data below.
 
 === SERVER INFO ===
 - Server Name: {server_name}
