@@ -514,36 +514,35 @@ async def on_message(message):
             await message.reply("❌ You don't have permission to use this command.")
             return
         guild_id = str(message.guild.id)
-        embed = discord.Embed(
-            description="🔄 Syncing all server data... please wait.",
-            color=BOT_COLOR
-        )
+        embed = discord.Embed(description="🔄 Syncing members, roles & channels...", color=BOT_COLOR)
         msg = await message.reply(embed=embed)
         try:
+            # Step 1 — sync members/roles/channels
             await sync_server_data(message.guild)
-            await fetch_channel_history(message.guild)
-            # Re-seed presence cache
+
+            # Step 2 — refresh presence cache
             for member in message.guild.members:
                 if not member.bot:
                     if guild_id not in presence_cache:
                         presence_cache[guild_id] = {}
                     presence_cache[guild_id][member.display_name] = str(member.status)
-            embed = discord.Embed(
-                title="✅ Sync Complete!",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="👥 Members", value=str(message.guild.member_count), inline=True)
-            embed.add_field(name="🏷️ Roles", value=str(len(message.guild.roles) - 1), inline=True)
-            embed.add_field(name="💬 Channels", value=str(len(message.guild.channels)), inline=True)
+
             online = sum(1 for s in presence_cache.get(guild_id, {}).values() if s == "online")
-            embed.add_field(name="🟢 Online", value=str(online), inline=True)
+
+            # Step 3 — update message to show done
+            embed = discord.Embed(title="✅ Sync Complete!", color=discord.Color.green())
+            embed.add_field(name="👥 Members",  value=str(message.guild.member_count), inline=True)
+            embed.add_field(name="🏷️ Roles",   value=str(len(message.guild.roles) - 1), inline=True)
+            embed.add_field(name="💬 Channels", value=str(len(message.guild.channels)), inline=True)
+            embed.add_field(name="🟢 Online",   value=str(online), inline=True)
             embed.set_footer(text=f"Synced by {message.author.display_name}")
             await msg.edit(embed=embed)
+
+            # Step 4 — fetch message history in background (non-blocking)
+            asyncio.create_task(fetch_channel_history(message.guild))
+
         except Exception as e:
-            embed = discord.Embed(
-                description=f"❌ Sync failed: {e}",
-                color=discord.Color.red()
-            )
+            embed = discord.Embed(description=f"❌ Sync failed: {e}", color=discord.Color.red())
             await msg.edit(embed=embed)
         return
 
