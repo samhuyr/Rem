@@ -21,6 +21,7 @@ AI_URL = "https://api.groq.com/openai/v1/chat/completions"
 IGNORE_CHANNELS = ["bot-spam", "bot-commands"]
 HISTORY_LIMIT = 25
 BOT_COLOR = discord.Color.from_str("#5865F2")
+DEVELOPER_ID = 864213870494220341  # Bot developer — can use !restart from any server
 
 # ===== CONVERSATION MEMORY =====
 conversation_history: dict = {}
@@ -466,6 +467,16 @@ async def on_message(message):
     content = message.content.strip()
     content_lower = content.lower()
 
+    # ── !restart (developer only) ──────────────────────────────────────────
+    if content_lower == "!restart":
+        if message.author.id != DEVELOPER_ID:
+            await message.reply("❌ You don't have permission to use this command.")
+            return
+        await message.reply("🔄 Restarting bot... I'll be back in a few seconds!")
+        print(f"🔄 Restart triggered by {message.author} ({message.author.id})")
+        await bot.close()
+        return
+
     # ── !placeholders ──────────────────────────────────────────────────────
     if content_lower == "!placeholders":
         lines = "\n".join(f"• `{k}` — {v}" for k, v in PLACEHOLDERS.items())
@@ -639,6 +650,48 @@ async def on_presence_update(before, after):
     if guild_id not in presence_cache:
         presence_cache[guild_id] = {}
     presence_cache[guild_id][after.display_name] = str(after.status)
+
+
+@bot.event
+async def on_guild_role_create(role):
+    """Sync roles when a new role is created."""
+    if role.name == "@everyone":
+        return
+    guild_id = str(role.guild.id)
+    role_members = [m.display_name for m in role.members if not m.bot]
+    await asyncio.to_thread(roles_col.update_one,
+        {"name": role.name, "guild_id": guild_id},
+        {"$set": {"name": role.name, "guild_id": guild_id,
+                  "member_count": len(role_members), "members": role_members[:50]}},
+        True
+    )
+    await set_state(guild_id, "total_roles", str(len(role.guild.roles) - 1))
+    print(f"✅ Role created & saved: {role.name}")
+
+
+@bot.event
+async def on_guild_role_delete(role):
+    """Remove role from DB when deleted."""
+    guild_id = str(role.guild.id)
+    await asyncio.to_thread(roles_col.delete_one, {"name": role.name, "guild_id": guild_id})
+    await set_state(guild_id, "total_roles", str(len(role.guild.roles) - 1))
+    print(f"🗑️ Role deleted & removed: {role.name}")
+
+
+@bot.event
+async def on_guild_role_update(before, after):
+    """Sync role when it's renamed or members change."""
+    guild_id = str(after.guild.id)
+    role_members = [m.display_name for m in after.members if not m.bot]
+    # If renamed, delete old entry
+    if before.name != after.name:
+        await asyncio.to_thread(roles_col.delete_one, {"name": before.name, "guild_id": guild_id})
+    await asyncio.to_thread(roles_col.update_one,
+        {"name": after.name, "guild_id": guild_id},
+        {"$set": {"name": after.name, "guild_id": guild_id,
+                  "member_count": len(role_members), "members": role_members[:50]}},
+        True
+    )
 
 
 # ==========================================================================
