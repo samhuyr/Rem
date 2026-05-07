@@ -122,7 +122,7 @@ def _seed_guild_defaults(guild_id: str, guild_name: str):
     for key, value in defaults.items():
         if not state_col.find_one({"guild_id": guild_id, "key": key}):
             state_col.insert_one({"guild_id": guild_id, "key": key, "value": value})
-    print(f"âœ… Defaults seeded for guild: {guild_name} ({guild_id})")
+    print(f"✅ Defaults seeded for guild: {guild_name} ({guild_id})")
 
 def _save_message(message):
     try:
@@ -205,8 +205,9 @@ def _build_system_prompt(guild_id: str) -> str:
 You are helpful, friendly, and always up to date with real-time server data.
 Your name is Rem. Never refer to yourself by any other name.
 When mentioning channels, always use their Discord mention format like <#channel_id>.
-Keep answers concise. Use bullet points â€¢ for lists. No filler phrases.
-You have memory of the current conversation â€” stay on topic and refer back to what was said earlier when relevant.
+Keep answers concise. Use bullet points • for lists. No filler phrases.
+You have memory of the current conversation — stay on topic and refer back to what was said earlier when relevant.
+IMPORTANT: If anyone asks about your commands, tell them to use `!rem help` or `!rem list all` to see the real command list. Never make up or guess commands.
 
 === SERVER INFO ===
 - Server Name: {server_name}
@@ -266,10 +267,10 @@ def _ask_groq(prompt: str, guild_id: str, history: list) -> str:
             "Content-Type": "application/json"
         }, timeout=30)
         if resp.status_code != 200:
-            return f"âš ï¸ API Error {resp.status_code}: {resp.text[:200]}"
+            return f"⚠️ API Error {resp.status_code}: {resp.text[:200]}"
         return resp.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        return f"âš ï¸ Error: {e}"
+        return f"⚠️ Error: {e}"
 
 def _sync_server_data(guild):
     try:
@@ -318,7 +319,7 @@ def _sync_server_data(guild):
         _set_state(guild_id, "total_channels", str(len(guild.channels)))
         _set_state(guild_id, "total_roles", str(len(guild.roles) - 1))
         _set_state(guild_id, "server_name", guild.name)
-        print(f"âœ… [{guild.name}] Synced {guild.member_count} members, {len(guild.roles)} roles, {len(guild.channels)} channels")
+        print(f"✅ [{guild.name}] Synced {guild.member_count} members, {len(guild.roles)} roles, {len(guild.channels)} channels")
     except Exception as e:
         print(f"_sync_server_data error for {guild.name}: {e}")
 
@@ -345,7 +346,7 @@ async def ask_groq(prompt: str, guild_id: str, history: list) -> str:
     return await asyncio.to_thread(_ask_groq, prompt, guild_id, history)
 
 async def fetch_channel_history(guild):
-    print(f"ðŸ“– Fetching message history for {guild.name}...")
+    print(f"📖 Fetching message history for {guild.name}...")
     for channel in guild.text_channels:
         if channel.name in IGNORE_CHANNELS:
             continue
@@ -355,11 +356,11 @@ async def fetch_channel_history(guild):
                 if not message.author.bot and message.content:
                     await save_message(message)
                     count += 1
-            print(f"  âœ… #{channel.name}: {count} messages saved")
+            print(f"  ✅ #{channel.name}: {count} messages saved")
         except discord.Forbidden:
-            print(f"  âš ï¸ No access to #{channel.name}")
+            print(f"  ⚠️ No access to #{channel.name}")
         except Exception as e:
-            print(f"  âŒ #{channel.name} error: {e}")
+            print(f"  ❌ #{channel.name} error: {e}")
 
 # ==========================================================================
 # BOT SETUP
@@ -376,7 +377,7 @@ async def handle_ai_message(message, question: str):
     if not message.guild:
         return
     if not question.strip():
-        await message.reply("Hey! Ask me something ðŸ˜Š e.g. `!rem whats the last announcement?`")
+        await message.reply("Hey! Ask me something 😊 e.g. `!rem whats the last announcement?`")
         return
 
     channel_id = str(message.channel.id)
@@ -391,7 +392,7 @@ async def handle_ai_message(message, question: str):
             member = message.mentions[0]
             await set_staff(guild_id, role_key, str(member.id), member.display_name)
             role_display = role_key.replace("_", " ").title()
-            await message.reply(f"âœ… **{role_display}** has been set to {member.mention} and saved to database!")
+            await message.reply(f"✅ **{role_display}** has been set to {member.mention} and saved to database!")
             return
 
     if channel_id not in conversation_history:
@@ -426,14 +427,14 @@ async def on_command_error(ctx, error):
 
 @bot.event
 async def on_ready():
-    print(f"âœ… Logged in as {bot.user} ({bot.user.id})")
-    print(f"âœ… Connected to {len(bot.guilds)} guild(s)")
+    print(f"✅ Logged in as {bot.user} ({bot.user.id})")
+    print(f"✅ Connected to {len(bot.guilds)} guild(s)")
 
     try:
         synced = await bot.tree.sync()
-        print(f"âœ… Synced {len(synced)} slash commands globally")
+        print(f"✅ Synced {len(synced)} slash commands globally")
     except Exception as e:
-        print(f"âŒ Command sync failed: {e}")
+        print(f"❌ Command sync failed: {e}")
 
     for guild in bot.guilds:
         guild_id = str(guild.id)
@@ -448,7 +449,7 @@ async def on_ready():
                 presence_cache[guild_id][member.display_name] = str(member.status)
 
         online_count = sum(1 for s in presence_cache.get(guild_id, {}).values() if s == "online")
-        print(f"âœ… [{guild.name}] Presence seeded â€” {online_count} online")
+        print(f"✅ [{guild.name}] Presence seeded — {online_count} online")
 
     if not full_sync.is_running():
         full_sync.start()
@@ -465,11 +466,11 @@ async def on_message(message):
     content = message.content.strip()
     content_lower = content.lower()
 
-    # â”€â”€ !placeholders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── !placeholders ──────────────────────────────────────────────────────
     if content_lower == "!placeholders":
-        lines = "\n".join(f"â€¢ `{k}` â€” {v}" for k, v in PLACEHOLDERS.items())
+        lines = "\n".join(f"• `{k}` — {v}" for k, v in PLACEHOLDERS.items())
         embed = discord.Embed(
-            title="ðŸ“‹ Available Config Placeholders",
+            title="📋 Available Config Placeholders",
             description=f"You can edit these using `!edit <key> <value>`\n\n{lines}",
             color=BOT_COLOR
         )
@@ -477,32 +478,66 @@ async def on_message(message):
         await message.reply(embed=embed)
         return
 
-    # â”€â”€ !edit <key> <value> â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── !edit <key> <value> ────────────────────────────────────────────────
     if content_lower.startswith("!edit "):
         parts = content[6:].strip().split(" ", 1)
         if len(parts) < 2:
-            await message.reply("âŒ Usage: `!edit <key> <value>`\nRun `!placeholders` to see available keys.")
+            await message.reply("❌ Usage: `!edit <key> <value>`\nRun `!placeholders` to see available keys.")
             return
         key, value = parts[0].lower(), parts[1]
         if key not in PLACEHOLDERS:
-            await message.reply(f"âŒ Unknown key `{key}`. Run `!placeholders` to see valid keys.")
+            await message.reply(f"❌ Unknown key `{key}`. Run `!placeholders` to see valid keys.")
             return
         guild_id = str(message.guild.id)
         await set_state(guild_id, key, value)
         embed = discord.Embed(
-            description=f"âœ… Updated **{key}** to: `{value}`",
+            description=f"✅ Updated **{key}** to: `{value}`",
             color=discord.Color.green()
         )
         await message.reply(embed=embed)
         return
 
-    # â”€â”€ @Rem mention â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── !rem help / !rem list / !rem list all ─────────────────────────────
+    if content_lower in ("!rem help", "!rem list", "!rem list all", "!rem commands"):
+        embed = discord.Embed(
+            title="📋 Rem — All Commands",
+            color=BOT_COLOR
+        )
+        embed.add_field(name="🤖 AI Commands", value=(
+            "`!rem <question>` — Ask Rem anything about the server\n"
+            "`@Rem <question>` — Mention Rem to ask a question"
+        ), inline=False)
+        embed.add_field(name="⚙️ Config Commands", value=(
+            "`!edit <key> <value>` — Edit a server info field\n"
+            "`!placeholders` — Show all editable fields"
+        ), inline=False)
+        embed.add_field(name="👥 Staff Commands", value=(
+            "`!rem set founder @user` — Set founder\n"
+            "`!rem set owner @user` — Set owner\n"
+            "`!rem set admin @user` — Set admin\n"
+            "`!rem set senior_admin @user` — Set senior admin"
+        ), inline=False)
+        embed.add_field(name="📊 Slash Commands", value=(
+            "`/rem` — Ask Rem a question\n"
+            "`/serverinfo` — Show live server info\n"
+            "`/staff` — Show current staff list\n"
+            "`/roles` — Show all roles & members\n"
+            "`/members` — Show recent members\n"
+            "`/activity` — Show recent chat activity\n"
+            "`/editinfo` — Edit server info *(admin only)*\n"
+            "`/setstaff` — Set staff roles *(admin only)*"
+        ), inline=False)
+        embed.set_footer(text=f"Requested by {message.author.display_name}")
+        await message.reply(embed=embed)
+        return
+
+    # ── @Rem mention ───────────────────────────────────────────────────────
     if bot.user in message.mentions:
         question = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
         await handle_ai_message(message, question)
         return
 
-    # â”€â”€ !rem â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── !rem ───────────────────────────────────────────────────────────────
     if content_lower.startswith("!rem"):
         question = content[4:].strip()
         await handle_ai_message(message, question)
@@ -513,7 +548,7 @@ async def on_message(message):
 
 @bot.event
 async def on_guild_join(guild):
-    print(f"ðŸŽ‰ Joined new guild: {guild.name} ({guild.id})")
+    print(f"🎉 Joined new guild: {guild.name} ({guild.id})")
     guild_id = str(guild.id)
     await seed_guild_defaults(guild_id, guild.name)
     await sync_server_data(guild)
@@ -612,10 +647,10 @@ async def on_presence_update(before, after):
 
 @tasks.loop(minutes=10)
 async def full_sync():
-    print("ðŸ”„ Running full server sync...")
+    print("🔄 Running full server sync...")
     for guild in bot.guilds:
         await sync_server_data(guild)
-    print("âœ… Full sync complete.")
+    print("✅ Full sync complete.")
 
 # ==========================================================================
 # SLASH COMMANDS
@@ -628,7 +663,7 @@ async def rem_cmd(interaction: discord.Interaction, question: str):
 
     if not interaction.guild:
         await interaction.followup.send(
-            "âš ï¸ I can only answer questions from inside a server I've been added to.",
+            "⚠️ I can only answer questions from inside a server I've been added to.",
             ephemeral=True
         )
         return
@@ -663,36 +698,36 @@ async def rem_cmd(interaction: discord.Interaction, question: str):
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setstaff(interaction: discord.Interaction, role: str, member: discord.Member):
-    """Slash command to set staff roles â€” saves permanently to MongoDB."""
+    """Slash command to set staff roles — saves permanently to MongoDB."""
     if not interaction.guild:
-        await interaction.response.send_message("âš ï¸ This command only works inside a server.", ephemeral=True)
+        await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
 
     role_key = role.lower().replace("-", "_")
     valid_roles = ["founder", "owner", "admin", "senior_admin"]
     if role_key not in valid_roles:
         await interaction.response.send_message(
-            f"âŒ Invalid role. Choose from: `founder`, `owner`, `admin`, `senior_admin`",
+            f"❌ Invalid role. Choose from: `founder`, `owner`, `admin`, `senior_admin`",
             ephemeral=True
         )
         return
 
     await set_staff(str(interaction.guild.id), role_key, str(member.id), member.display_name)
     role_display = role_key.replace("_", " ").title()
-    await interaction.response.send_message(f"âœ… **{role_display}** set to {member.mention} and saved!", ephemeral=False)
+    await interaction.response.send_message(f"✅ **{role_display}** set to {member.mention} and saved!", ephemeral=False)
 
 
 @bot.tree.command(name="staff", description="Show current server staff")
 async def staff_cmd(interaction: discord.Interaction):
     """Show who is set as founder/owner/admin/senior-admin."""
     if not interaction.guild:
-        await interaction.response.send_message("âš ï¸ This command only works inside a server.", ephemeral=True)
+        await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
 
     guild_id = str(interaction.guild.id)
     staff = await get_staff(guild_id)
 
-    embed = discord.Embed(title=f"ðŸ‘¥ {interaction.guild.name} â€” Staff", color=BOT_COLOR)
+    embed = discord.Embed(title=f"👥 {interaction.guild.name} — Staff", color=BOT_COLOR)
 
     def fmt(role_key):
         uid = staff.get(role_key)
@@ -701,10 +736,10 @@ async def staff_cmd(interaction: discord.Interaction):
             return f"<@{uid}> ({name})"
         return "Not set"
 
-    embed.add_field(name="ðŸ‘‘ Founder",      value=fmt("founder"),      inline=False)
-    embed.add_field(name="ðŸ›¡ï¸ Owner",        value=fmt("owner"),        inline=False)
-    embed.add_field(name="âš™ï¸ Admin",        value=fmt("admin"),        inline=False)
-    embed.add_field(name="ðŸ”° Senior Admin", value=fmt("senior_admin"), inline=False)
+    embed.add_field(name="👑 Founder",      value=fmt("founder"),      inline=False)
+    embed.add_field(name="🛡️ Owner",        value=fmt("owner"),        inline=False)
+    embed.add_field(name="⚙️ Admin",        value=fmt("admin"),        inline=False)
+    embed.add_field(name="🔰 Senior Admin", value=fmt("senior_admin"), inline=False)
     embed.set_footer(text=f"Use /setstaff or !rem set founder @user to update")
     await interaction.response.send_message(embed=embed)
 
@@ -712,7 +747,7 @@ async def staff_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="serverinfo", description="Show live server info")
 async def serverinfo(interaction: discord.Interaction):
     if not interaction.guild:
-        await interaction.response.send_message("âš ï¸ This command only works inside a server.", ephemeral=True)
+        await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
 
     guild_id = str(interaction.guild.id)
@@ -722,31 +757,31 @@ async def serverinfo(interaction: discord.Interaction):
         lambda: list(messages_col.find({"guild_id": guild_id}).sort("timestamp", pymongo.DESCENDING).limit(3))
     )
 
-    embed = discord.Embed(title=f"ðŸŒ {state.get('server_name', interaction.guild.name)} â€” Live Info", color=BOT_COLOR)
-    embed.add_field(name="ðŸ“¡ Server IP",  value=f"`{state.get('server_ip', 'N/A')}`", inline=True)
-    embed.add_field(name="ðŸ“¦ Version",    value=state.get("version", "N/A"), inline=True)
-    embed.add_field(name="ðŸ‘¥ Members",    value=state.get("total_members", "N/A"), inline=True)
-    embed.add_field(name="ðŸ’¬ Channels",   value=state.get("total_channels", "N/A"), inline=True)
-    embed.add_field(name="ðŸ·ï¸ Roles",      value=state.get("total_roles", "N/A"), inline=True)
-    embed.add_field(name="ðŸ›’ Store",      value=state.get("store", "N/A"), inline=True)
+    embed = discord.Embed(title=f"🌐 {state.get('server_name', interaction.guild.name)} — Live Info", color=BOT_COLOR)
+    embed.add_field(name="📡 Server IP",  value=f"`{state.get('server_ip', 'N/A')}`", inline=True)
+    embed.add_field(name="📦 Version",    value=state.get("version", "N/A"), inline=True)
+    embed.add_field(name="👥 Members",    value=state.get("total_members", "N/A"), inline=True)
+    embed.add_field(name="💬 Channels",   value=state.get("total_channels", "N/A"), inline=True)
+    embed.add_field(name="🏷️ Roles",      value=state.get("total_roles", "N/A"), inline=True)
+    embed.add_field(name="🛒 Store",      value=state.get("store", "N/A"), inline=True)
     if state.get("discord_invite", "N/A") != "N/A":
-        embed.add_field(name="ðŸ”— Invite", value=state["discord_invite"], inline=True)
+        embed.add_field(name="🔗 Invite", value=state["discord_invite"], inline=True)
 
     if recent:
         activity = "\n".join(
-            f"â€¢ #{m['channel']} **{m['author']}**: {m['content'][:60]}"
+            f"• #{m['channel']} **{m['author']}**: {m['content'][:60]}"
             for m in recent
         )
-        embed.add_field(name="ðŸ“‹ Recent Activity", value=activity, inline=False)
+        embed.add_field(name="📋 Recent Activity", value=activity, inline=False)
 
-    embed.set_footer(text=f"Live data â€¢ {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
+    embed.set_footer(text=f"Live data • {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="roles", description="Show server roles and their members")
 async def roles_cmd(interaction: discord.Interaction):
     if not interaction.guild:
-        await interaction.response.send_message("âš ï¸ This command only works inside a server.", ephemeral=True)
+        await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
 
     guild_id = str(interaction.guild.id)
@@ -754,23 +789,23 @@ async def roles_cmd(interaction: discord.Interaction):
         lambda: list(roles_col.find({"guild_id": guild_id}).sort("member_count", pymongo.DESCENDING))
     )
     if not roles:
-        await interaction.response.send_message("âŒ No role data yet â€” try again in a minute.", ephemeral=True)
+        await interaction.response.send_message("❌ No role data yet — try again in a minute.", ephemeral=True)
         return
 
-    embed = discord.Embed(title=f"ðŸ·ï¸ {interaction.guild.name} Roles", color=BOT_COLOR)
+    embed = discord.Embed(title=f"🏷️ {interaction.guild.name} Roles", color=BOT_COLOR)
     for r in roles[:15]:
         names = ", ".join(r["members"][:8]) or "No members"
         if r["member_count"] > 8:
             names += f" +{r['member_count'] - 8} more"
         embed.add_field(name=f"{r['name']} ({r['member_count']})", value=names, inline=False)
-    embed.set_footer(text=f"Live data â€¢ {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
+    embed.set_footer(text=f"Live data • {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="members", description="Show recent server members and their roles")
 async def members_cmd(interaction: discord.Interaction):
     if not interaction.guild:
-        await interaction.response.send_message("âš ï¸ This command only works inside a server.", ephemeral=True)
+        await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
 
     guild_id = str(interaction.guild.id)
@@ -778,24 +813,24 @@ async def members_cmd(interaction: discord.Interaction):
         lambda: list(members_col.find({"guild_id": guild_id, "bot": False}).sort("joined_at", pymongo.DESCENDING).limit(10))
     )
     if not members:
-        await interaction.response.send_message("âŒ No member data yet â€” try again after the bot has synced.", ephemeral=True)
+        await interaction.response.send_message("❌ No member data yet — try again after the bot has synced.", ephemeral=True)
         return
 
-    embed = discord.Embed(title=f"ðŸ‘¥ Recent Members â€” {interaction.guild.name}", color=BOT_COLOR)
+    embed = discord.Embed(title=f"👥 Recent Members — {interaction.guild.name}", color=BOT_COLOR)
     lines = []
     for m in members:
         roles_str = ", ".join(m["roles"]) if m.get("roles") else "No roles"
         joined = m["joined_at"].strftime("%b %d") if m.get("joined_at") else "?"
-        lines.append(f"**{m['name']}** â€” {roles_str} *(joined {joined})*")
+        lines.append(f"**{m['name']}** — {roles_str} *(joined {joined})*")
     embed.description = "\n".join(lines)
-    embed.set_footer(text=f"Live data â€¢ {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
+    embed.set_footer(text=f"Live data • {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="activity", description="Show recent chat activity")
 async def activity_cmd(interaction: discord.Interaction):
     if not interaction.guild:
-        await interaction.response.send_message("âš ï¸ This command only works inside a server.", ephemeral=True)
+        await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
 
     guild_id = str(interaction.guild.id)
@@ -803,13 +838,13 @@ async def activity_cmd(interaction: discord.Interaction):
         lambda: list(messages_col.find({"guild_id": guild_id}).sort("timestamp", pymongo.DESCENDING).limit(10))
     )
     if not recent:
-        await interaction.response.send_message("âŒ No message history yet â€” try again after the bot has been running.", ephemeral=True)
+        await interaction.response.send_message("❌ No message history yet — try again after the bot has been running.", ephemeral=True)
         return
 
-    embed = discord.Embed(title=f"ðŸ“‹ Recent Activity â€” {interaction.guild.name}", color=BOT_COLOR)
+    embed = discord.Embed(title=f"📋 Recent Activity — {interaction.guild.name}", color=BOT_COLOR)
     lines = [f"**#{m['channel']}** {m['author']}: {m['content'][:80]}" for m in reversed(recent)]
     embed.description = "\n".join(lines)
-    embed.set_footer(text=f"Live data â€¢ {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
+    embed.set_footer(text=f"Live data • {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     await interaction.response.send_message(embed=embed)
 
 
@@ -818,10 +853,10 @@ async def activity_cmd(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(manage_guild=True)
 async def editinfo(interaction: discord.Interaction, key: str, value: str):
     if not interaction.guild:
-        await interaction.response.send_message("âš ï¸ This command only works inside a server.", ephemeral=True)
+        await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
     await set_state(str(interaction.guild.id), key.lower().replace(" ", "_"), value)
-    await interaction.response.send_message(f"âœ… Updated **{key}** â†’ `{value}`", ephemeral=True)
+    await interaction.response.send_message(f"✅ Updated **{key}** → `{value}`", ephemeral=True)
 
 
 # ==========================================================================
