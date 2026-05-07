@@ -16,7 +16,7 @@ DATABASE_NAME = os.environ.get("DATABASE_NAME", "auramc")
 GROQ_API_KEY  = os.environ["GROQ_API_KEY"]
 
 # ===== SETTINGS =====
-AI_MODEL = "llama-3.1-8b-instant"
+AI_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 AI_URL = "https://api.groq.com/openai/v1/chat/completions"
 IGNORE_CHANNELS = ["bot-spam", "bot-commands"]
 HISTORY_LIMIT = 25
