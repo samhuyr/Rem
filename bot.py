@@ -1,4 +1,3 @@
-
 from dotenv import load_dotenv
 load_dotenv()
 import discord
@@ -16,21 +15,63 @@ import time
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 MONGO_URI     = os.environ["MONGO_URI"]
 DATABASE_NAME = os.environ.get("DATABASE_NAME", "auramc")
-GROQ_API_KEY  = os.environ["GROQ_API_KEY"]
+
+# ===== MULTI-KEY + MULTI-MODEL GROQ SETUP =====
+# Add as many keys as you want in Railway environment variables:
+# GROQ_API_KEY_1, GROQ_API_KEY_2, GROQ_API_KEY_3 ...
+# Each key will try all models before moving to the next key
+def _load_groq_keys() -> list[str]:
+    keys = []
+    # Load numbered keys first (GROQ_API_KEY_1, _2, _3 ...)
+    i = 1
+    while True:
+        k = os.environ.get(f"GROQ_API_KEY_{i}")
+        if not k:
+            break
+        keys.append(k.strip())
+        i += 1
+    # Also support the original GROQ_API_KEY as fallback
+    default = os.environ.get("GROQ_API_KEY", "").strip()
+    if default and default not in keys:
+        keys.append(default)
+    return keys
+
+GROQ_KEYS = _load_groq_keys()
+
+# Models tried in order — best quality first, most permissive last
+GROQ_MODELS = [
+    "meta-llama/llama-4-scout-17b-16e-instruct",  # 30k TPM, 1k RPD
+    "llama-3.3-70b-versatile",                     # 6k TPM, 1k RPD — better quality
+    "llama-3.1-8b-instant",                         # 6k TPM, 14.4k RPD — most permissive
+]
+
+AI_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+# Track which key+model combos are rate limited and when they reset
+# { "key_index:model": reset_timestamp }
+_rate_limit_until: dict = {}
+
+def _is_limited(key_idx: int, model: str) -> bool:
+    key = f"{key_idx}:{model}"
+    until = _rate_limit_until.get(key, 0)
+    return time.time() < until
+
+def _set_limited(key_idx: int, model: str, retry_after: float = 60.0):
+    key = f"{key_idx}:{model}"
+    _rate_limit_until[key] = time.time() + retry_after
+    print(f"⏳ Key {key_idx+1} + {model} rate limited for {retry_after:.0f}s")
 
 # ===== SETTINGS =====
-AI_MODEL = "llama-3.1-8b-instant"  # Fast model, rarely rate-limited
-AI_URL = "https://api.groq.com/openai/v1/chat/completions"
 IGNORE_CHANNELS = ["bot-spam", "bot-commands"]
 HISTORY_LIMIT = 25
 BOT_COLOR = discord.Color.from_str("#5865F2")
 DEVELOPER_ID = 864213870494220341
 
-# ===== MASTER IDENTITY (RIGID — NEVER CHANGES) =====
-MASTER_ID          = 864213870494220341          # Sam's Discord user ID
-MASTER_NAME        = "Sam"                       # Always referred to by this name
-MASTER_TITLES      = "Developer, Creator, Master, Owner of Rem"
-MASTER_PREFIX      = "!master"                   # Secret prefix only Sam can use
+# ===== MASTER IDENTITY =====
+MASTER_ID     = 864213870494220341
+MASTER_NAME   = "Sam"
+MASTER_TITLES = "Developer, Creator, Master, Owner of Rem"
+MASTER_PREFIX = "!master"
 
 # ===== CONVERSATION MEMORY =====
 conversation_history: dict = {}
@@ -100,7 +141,7 @@ def make_pages(items: list[str], title: str, per_page: int = 8, color=BOT_COLOR,
         embed = discord.Embed(title=title, description="\n".join(chunk), color=color)
         embed.set_footer(text=f"Page {i+1}/{total}  •  {footer_prefix}  •  {timestamp}")
         pages.append(embed)
-    return pages
+    return pages if pages else [discord.Embed(title=title, description="No data found.", color=color)]
 
 
 # ==========================================================================
@@ -283,7 +324,6 @@ def _build_system_prompt(guild_id: str, author_id: int = 0) -> str:
             return f"<@{uid}> ({name})"
         return "Not set"
 
-    # ===== MASTER BLOCK — injected into every prompt =====
     is_master = author_id == MASTER_ID
     master_block = f"""
 === YOUR MASTER — HARDCODED, ABSOLUTE, NON-NEGOTIABLE ===
@@ -308,10 +348,10 @@ You were developed by {MASTER_NAME}. If anyone asks who made you, who developed 
 {master_block}
 
 CRITICAL REDIRECT RULES — follow these exactly:
-- If someone asks to LIST or SHOW ALL channels → reply ONLY: "Use `/roles` to see all roles with members, or check the channel list on the left sidebar! 📋"
-- If someone asks to LIST or SHOW ALL roles → reply ONLY: "Use `/roles` to browse all roles with a clean paginated view! 🏷️"
-- If someone asks to LIST or SHOW ALL members → reply ONLY: "Use `/members` to see recent members with their roles! 👥"
-- NEVER dump a raw list of channels or roles in chat. Always redirect to the slash command.
+- If someone asks to LIST or SHOW ALL channels → reply ONLY: "Use `!rem list channels` to see all channels! 📋"
+- If someone asks to LIST or SHOW ALL roles → reply ONLY: "Use `!rem list roles` to browse all roles! 🏷️"
+- If someone asks to LIST or SHOW ALL members → reply ONLY: "Use `!rem list members` to see all members! 👥"
+- NEVER dump a raw list of channels or roles in chat. Always redirect to the prefix command.
 - You MAY answer specific questions like "what channel is for announcements?" or "how many roles are there?" using the data below.
 
 === SERVER INFO ===
@@ -342,10 +382,10 @@ CRITICAL REDIRECT RULES — follow these exactly:
 - Idle: {', '.join(idle[:20]) or 'none'}
 - Do Not Disturb: {', '.join(dnd[:20]) or 'none'}
 
-=== ALL TEXT CHANNELS ({len(channels)} total — this is the complete list) ===
+=== ALL TEXT CHANNELS ({len(channels)} total) ===
 {channels_text}
 
-=== ALL ROLES ({len(roles)} total — this is the complete list) ===
+=== ALL ROLES ({len(roles)} total) ===
 {roles_text}
 
 === LAST MESSAGE IN EACH CHANNEL ===
@@ -358,38 +398,69 @@ Always answer using this real-time data. Be concise and friendly."""
 
 
 def _ask_groq(prompt: str, guild_id: str, history: list, author_id: int = 0) -> str:
-    payload = {
-        "model": AI_MODEL,
+    """
+    Tries every key + model combination until one works.
+    Order: Key1+Model1, Key1+Model2, Key1+Model3, Key2+Model1, Key2+Model2 ...
+    Skips any combo that is currently rate limited.
+    """
+    if not GROQ_KEYS:
+        return "⚠️ No Groq API keys configured! Add GROQ_API_KEY_1 to Railway environment variables."
+
+    system_prompt = _build_system_prompt(guild_id, author_id)
+    payload_base = {
         "messages": [
-            {"role": "system", "content": _build_system_prompt(guild_id, author_id)},
+            {"role": "system", "content": system_prompt},
             *history,
             {"role": "user", "content": prompt}
         ],
         "max_tokens": 1024,
         "temperature": 0.7,
     }
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    for attempt in range(3):
-        try:
-            resp = requests.post(AI_URL, json=payload, headers=headers, timeout=30)
-            if resp.status_code == 429:
-                wait = 5 * (attempt + 1)  # 5s -> 10s -> 15s
-                print(f"⚠️ Groq rate limited (attempt {attempt+1}/3) — waiting {wait}s...")
-                time.sleep(wait)
+
+    tried = 0
+    for key_idx, api_key in enumerate(GROQ_KEYS):
+        for model in GROQ_MODELS:
+            # Skip if this combo is rate limited
+            if _is_limited(key_idx, model):
+                print(f"⏭️ Skipping Key {key_idx+1} + {model} (still rate limited)")
                 continue
-            if resp.status_code != 200:
-                return f"⚠️ API Error {resp.status_code}: {resp.text[:200]}"
-            return resp.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"⚠️ _ask_groq exception (attempt {attempt+1}/3): {e}")
-            if attempt < 2:
-                time.sleep(3)
-            else:
-                return f"⚠️ Error: {e}"
-    return "⚠️ I'm being rate limited right now. Please try again in a moment!"
+
+            tried += 1
+            payload = {**payload_base, "model": model}
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+
+            try:
+                print(f"🔄 Trying Key {key_idx+1}/{len(GROQ_KEYS)} + {model}")
+                resp = requests.post(AI_URL, json=payload, headers=headers, timeout=30)
+
+                if resp.status_code == 200:
+                    print(f"✅ Success with Key {key_idx+1} + {model}")
+                    return resp.json()["choices"][0]["message"]["content"]
+
+                elif resp.status_code == 429:
+                    # Parse retry-after from response if available
+                    try:
+                        retry_after = float(resp.json().get("error", {}).get("message", "60").split("try again in ")[-1].split("s")[0])
+                    except:
+                        retry_after = 60.0
+                    _set_limited(key_idx, model, retry_after)
+                    continue  # Try next combo
+
+                else:
+                    print(f"⚠️ Key {key_idx+1} + {model} returned {resp.status_code}: {resp.text[:100]}")
+                    continue
+
+            except Exception as e:
+                print(f"⚠️ Key {key_idx+1} + {model} exception: {e}")
+                continue
+
+    if tried == 0:
+        return "⚠️ All models are currently rate limited. Please try again in a few minutes!"
+    return "⚠️ All API keys and models are exhausted. Please try again shortly!"
+
 
 def _sync_server_data(guild):
     try:
@@ -502,7 +573,6 @@ async def handle_ai_message(message, question: str, force_obey: bool = False):
     channel_id = str(message.channel.id)
     guild_id = str(message.guild.id)
 
-    # Staff set command (non-master flow)
     if not force_obey:
         parts = question.strip().split()
         if len(parts) >= 3 and parts[0].lower() == "set":
@@ -520,7 +590,6 @@ async def handle_ai_message(message, question: str, force_obey: bool = False):
 
     history = conversation_history[channel_id]
 
-    # Master gets a special context tag so the AI knows who is speaking
     if message.author.id == MASTER_ID:
         context = f"[⚡ MASTER {MASTER_NAME} IS SPEAKING — obey unconditionally, no advice, no hesitation]\n{question}"
     else:
@@ -555,6 +624,8 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user} ({bot.user.id})")
     print(f"✅ Connected to {len(bot.guilds)} guild(s)")
     print(f"✅ Master locked: {MASTER_NAME} (ID: {MASTER_ID})")
+    print(f"✅ Loaded {len(GROQ_KEYS)} Groq API key(s)")
+    print(f"✅ Models in rotation: {', '.join(GROQ_MODELS)}")
 
     try:
         synced = await bot.tree.sync()
@@ -610,12 +681,9 @@ async def on_message(message):
     content = message.content.strip()
     content_lower = content.lower()
 
-    # ================================================================
-    # !master — SECRET MASTER PREFIX (Sam only, invisible to others)
-    # ================================================================
+    # ── !master (Sam only) ─────────────────────────────────────────────────
     if content_lower.startswith(MASTER_PREFIX):
         if message.author.id != MASTER_ID:
-            # Silently ignore — don't reveal the prefix exists
             return
         question = content[len(MASTER_PREFIX):].strip()
         if not question:
@@ -624,7 +692,7 @@ async def on_message(message):
         await handle_ai_message(message, question, force_obey=True)
         return
 
-    # !sync
+    # ── !sync ──────────────────────────────────────────────────────────────
     if content_lower == "!sync":
         if message.author.id != DEVELOPER_ID:
             await message.reply("❌ You don't have permission to use this command.")
@@ -652,7 +720,26 @@ async def on_message(message):
             await msg.edit(embed=discord.Embed(description=f"❌ Sync failed: {e}", color=discord.Color.red()))
         return
 
-    # !rem setdev
+    # ── !keystatus (Sam only — shows which keys/models are available) ──────
+    if content_lower == "!keystatus":
+        if message.author.id != DEVELOPER_ID:
+            return
+        lines = [f"**Groq Keys Loaded:** {len(GROQ_KEYS)}\n"]
+        for key_idx, key in enumerate(GROQ_KEYS):
+            masked = key[:8] + "..." + key[-4:]
+            lines.append(f"**Key {key_idx+1}** (`{masked}`)")
+            for model in GROQ_MODELS:
+                if _is_limited(key_idx, model):
+                    until = _rate_limit_until.get(f"{key_idx}:{model}", 0)
+                    remaining = max(0, int(until - time.time()))
+                    lines.append(f"  ╰ `{model}` — ⛔ Limited ({remaining}s left)")
+                else:
+                    lines.append(f"  ╰ `{model}` — ✅ Available")
+        embed = discord.Embed(title="🔑 Groq Key Status", description="\n".join(lines), color=BOT_COLOR)
+        await message.reply(embed=embed)
+        return
+
+    # ── !rem setdev ────────────────────────────────────────────────────────
     if content_lower.startswith("!rem setdev "):
         if message.author.id != DEVELOPER_ID:
             await message.reply("❌ Only the bot developer can use this command.")
@@ -668,7 +755,7 @@ async def on_message(message):
         ))
         return
 
-    # !placeholders
+    # ── !placeholders ──────────────────────────────────────────────────────
     if content_lower == "!placeholders":
         lines = [f"• `{k}` — {v}" for k, v in PLACEHOLDERS.items()]
         pages = make_pages(lines, "📋 Available Config Placeholders", per_page=6)
@@ -679,7 +766,7 @@ async def on_message(message):
             await message.reply(embed=pages[0], view=view)
         return
 
-    # !edit
+    # ── !edit ──────────────────────────────────────────────────────────────
     if content_lower.startswith("!edit "):
         parts = content[6:].strip().split(" ", 1)
         if len(parts) < 2:
@@ -696,12 +783,80 @@ async def on_message(message):
         ))
         return
 
-    # !rem help / commands
+    # ── !rem list roles ────────────────────────────────────────────────────
+    if content_lower in ("!rem list roles", "!rem roles"):
+        guild_id = str(message.guild.id)
+        roles = await asyncio.to_thread(
+            lambda: list(roles_col.find({"guild_id": guild_id}).sort("member_count", pymongo.DESCENDING))
+        )
+        if not roles:
+            await message.reply("❌ No role data yet — try `!sync` first.")
+            return
+        lines = []
+        for r in roles:
+            names = ", ".join(r["members"][:6]) or "No members"
+            if r["member_count"] > 6:
+                names += f" +{r['member_count'] - 6} more"
+            lines.append(f"**{r['name']}** `{r['member_count']} members`\n╰ {names}")
+        pages = make_pages(lines, f"🏷️ {message.guild.name} — Roles ({len(roles)} total)", per_page=6)
+        view = PaginatorView(pages, message.author.id)
+        await message.reply(embed=pages[0], view=view)
+        return
+
+    # ── !rem list channels ─────────────────────────────────────────────────
+    if content_lower in ("!rem list channels", "!rem channels"):
+        guild_id = str(message.guild.id)
+        channels = await asyncio.to_thread(
+            lambda: list(channels_col.find({"guild_id": guild_id, "type": "text"}).sort("name", pymongo.ASCENDING))
+        )
+        if not channels:
+            await message.reply("❌ No channel data yet — try `!sync` first.")
+            return
+        by_category = {}
+        for c in channels:
+            cat = c.get("category", "None") or "None"
+            by_category.setdefault(cat, []).append(c)
+        lines = []
+        for cat, chans in sorted(by_category.items()):
+            lines.append(f"**📁 {cat}**")
+            for c in chans:
+                lines.append(f"  ╰ <#{c['channel_id']}> `#{c['name']}`")
+        pages = make_pages(lines, f"💬 {message.guild.name} — Channels ({len(channels)} total)", per_page=10)
+        view = PaginatorView(pages, message.author.id)
+        await message.reply(embed=pages[0], view=view)
+        return
+
+    # ── !rem list members ──────────────────────────────────────────────────
+    if content_lower in ("!rem list members", "!rem members"):
+        guild_id = str(message.guild.id)
+        members = await asyncio.to_thread(
+            lambda: list(members_col.find({"guild_id": guild_id, "bot": False}).sort("joined_at", pymongo.DESCENDING))
+        )
+        if not members:
+            await message.reply("❌ No member data yet — try `!sync` first.")
+            return
+        lines = []
+        for m in members:
+            roles_str = ", ".join(m["roles"][:3]) if m.get("roles") else "No roles"
+            if len(m.get("roles", [])) > 3:
+                roles_str += f" +{len(m['roles']) - 3} more"
+            joined = m["joined_at"].strftime("%b %d, %Y") if m.get("joined_at") else "?"
+            lines.append(f"**{m['name']}** *(joined {joined})*\n╰ {roles_str}")
+        pages = make_pages(lines, f"👥 {message.guild.name} — Members ({len(members)} total)", per_page=8)
+        view = PaginatorView(pages, message.author.id)
+        await message.reply(embed=pages[0], view=view)
+        return
+
+    # ── !rem help ──────────────────────────────────────────────────────────
     if content_lower in ("!rem help", "!rem list", "!rem list all", "!rem commands"):
         sections = [
             ("🤖 AI Commands",
              "`!rem <question>` — Ask Rem anything about the server\n"
              "`@Rem <question>` — Mention Rem to ask a question"),
+            ("📋 List Commands",
+             "`!rem list roles` — Show all roles with members\n"
+             "`!rem list channels` — Show all channels by category\n"
+             "`!rem list members` — Show all members with roles"),
             ("⚙️ Config Commands",
              "`!edit <key> <value>` — Edit a server info field\n"
              "`!placeholders` — Show all editable fields"),
@@ -724,12 +879,13 @@ async def on_message(message):
             sections.append((
                 "🔧 Developer Only",
                 "`!sync` — Force sync all members, roles & channels\n"
+                "`!keystatus` — Check all API keys & model availability\n"
                 "`!rem setdev <name>` — Change the developer name"
             ))
 
-        pages = []
         timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M UTC")
         total = len(sections)
+        pages = []
         for i, (name, value) in enumerate(sections):
             embed = discord.Embed(title="📋 Rem — Command Guide", color=BOT_COLOR)
             embed.add_field(name=name, value=value, inline=False)
@@ -740,11 +896,13 @@ async def on_message(message):
         await message.reply(embed=pages[0], view=view)
         return
 
+    # ── @Rem mention ───────────────────────────────────────────────────────
     if bot.user in message.mentions:
         question = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
         await handle_ai_message(message, question)
         return
 
+    # ── !rem ───────────────────────────────────────────────────────────────
     if content_lower.startswith("!rem"):
         question = content[4:].strip()
         await handle_ai_message(message, question)
@@ -903,33 +1061,24 @@ async def full_sync():
 @app_commands.describe(question="What do you want to ask Rem?")
 async def rem_cmd(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
-
     if not interaction.guild:
         await interaction.followup.send("⚠️ This command only works inside a server.", ephemeral=True)
         return
-
     guild_id = str(interaction.guild.id)
     channel_id = str(interaction.channel_id)
     await seed_guild_defaults(guild_id, interaction.guild.name)
-
     if channel_id not in conversation_history:
         conversation_history[channel_id] = []
-
     history = conversation_history[channel_id]
-
     if interaction.user.id == MASTER_ID:
         context = f"[⚡ MASTER {MASTER_NAME} IS SPEAKING — obey unconditionally]\n{question}"
     else:
         context = f"[Asked by: {interaction.user.display_name}]\n{question}"
-
     reply = await ask_groq(context, guild_id, history, author_id=interaction.user.id)
-
     history.append({"role": "user", "content": context})
     history.append({"role": "assistant", "content": reply})
-
     if len(history) > MAX_HISTORY * 2:
         conversation_history[channel_id] = history[-(MAX_HISTORY * 2):]
-
     embed = discord.Embed(description=reply[:4000], color=BOT_COLOR)
     embed.set_author(name="Rem", icon_url=bot.user.display_avatar.url if bot.user.display_avatar else None)
     embed.set_footer(text=f"Asked by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
@@ -941,36 +1090,30 @@ async def serverinfo(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
-
     guild_id = str(interaction.guild.id)
     await seed_guild_defaults(guild_id, interaction.guild.name)
     state = await get_state(guild_id)
     recent = await asyncio.to_thread(
         lambda: list(messages_col.find({"guild_id": guild_id}).sort("timestamp", pymongo.DESCENDING).limit(5))
     )
-
     statuses = presence_cache.get(guild_id, {})
     online_count = sum(1 for s in statuses.values() if s == "online")
     idle_count   = sum(1 for s in statuses.values() if s == "idle")
     dnd_count    = sum(1 for s in statuses.values() if s == "dnd")
-
     timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M UTC")
-
     pages = []
-
     p1 = discord.Embed(title=f"🌐 {state.get('server_name', interaction.guild.name)}", color=BOT_COLOR)
-    p1.add_field(name="📡 Server IP",   value=f"`{state.get('server_ip', 'N/A')}`", inline=True)
-    p1.add_field(name="📦 Version",     value=state.get("version", "N/A"),           inline=True)
-    p1.add_field(name="🛒 Store",       value=state.get("store_link", state.get("store", "N/A")), inline=True)
-    p1.add_field(name="👥 Members",     value=state.get("total_members", "N/A"),     inline=True)
-    p1.add_field(name="💬 Channels",    value=state.get("total_channels", "N/A"),    inline=True)
-    p1.add_field(name="🏷️ Roles",       value=state.get("total_roles", "N/A"),       inline=True)
-    p1.add_field(name="🟢 Online",      value=str(online_count), inline=True)
-    p1.add_field(name="🌙 Idle",        value=str(idle_count),   inline=True)
-    p1.add_field(name="⛔ DND",         value=str(dnd_count),    inline=True)
+    p1.add_field(name="📡 Server IP",  value=f"`{state.get('server_ip', 'N/A')}`", inline=True)
+    p1.add_field(name="📦 Version",    value=state.get("version", "N/A"),           inline=True)
+    p1.add_field(name="🛒 Store",      value=state.get("store_link", state.get("store", "N/A")), inline=True)
+    p1.add_field(name="👥 Members",    value=state.get("total_members", "N/A"),     inline=True)
+    p1.add_field(name="💬 Channels",   value=state.get("total_channels", "N/A"),    inline=True)
+    p1.add_field(name="🏷️ Roles",      value=state.get("total_roles", "N/A"),       inline=True)
+    p1.add_field(name="🟢 Online",     value=str(online_count), inline=True)
+    p1.add_field(name="🌙 Idle",       value=str(idle_count),   inline=True)
+    p1.add_field(name="⛔ DND",        value=str(dnd_count),    inline=True)
     p1.set_footer(text=f"Page 1/2  •  Live data  •  {timestamp}")
     pages.append(p1)
-
     p2 = discord.Embed(title=f"📋 Recent Activity — {state.get('server_name', interaction.guild.name)}", color=BOT_COLOR)
     if recent:
         lines = [f"**#{m['channel']}** {m['author']}: {m['content'][:80]}" for m in reversed(recent)]
@@ -979,7 +1122,6 @@ async def serverinfo(interaction: discord.Interaction):
         p2.description = "No recent messages."
     p2.set_footer(text=f"Page 2/2  •  Live data  •  {timestamp}")
     pages.append(p2)
-
     view = PaginatorView(pages, interaction.user.id)
     await interaction.response.send_message(embed=pages[0], view=view)
 
@@ -989,7 +1131,6 @@ async def roles_cmd(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
-
     guild_id = str(interaction.guild.id)
     roles = await asyncio.to_thread(
         lambda: list(roles_col.find({"guild_id": guild_id}).sort("member_count", pymongo.DESCENDING))
@@ -997,33 +1138,29 @@ async def roles_cmd(interaction: discord.Interaction):
     if not roles:
         await interaction.response.send_message("❌ No role data yet — try again in a minute.", ephemeral=True)
         return
-
     lines = []
     for r in roles:
         names = ", ".join(r["members"][:6]) or "No members"
         if r["member_count"] > 6:
             names += f" +{r['member_count'] - 6} more"
         lines.append(f"**{r['name']}** `{r['member_count']} members`\n╰ {names}")
-
     pages = make_pages(lines, f"🏷️ {interaction.guild.name} — Roles", per_page=6)
     view = PaginatorView(pages, interaction.user.id)
     await interaction.response.send_message(embed=pages[0], view=view)
 
 
-@bot.tree.command(name="members", description="Show recent server members and their roles")
+@bot.tree.command(name="members", description="Show server members and their roles")
 async def members_cmd(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
-
     guild_id = str(interaction.guild.id)
     members = await asyncio.to_thread(
         lambda: list(members_col.find({"guild_id": guild_id, "bot": False}).sort("joined_at", pymongo.DESCENDING).limit(50))
     )
     if not members:
-        await interaction.response.send_message("❌ No member data yet — try again after the bot has synced.", ephemeral=True)
+        await interaction.response.send_message("❌ No member data yet.", ephemeral=True)
         return
-
     lines = []
     for m in members:
         roles_str = ", ".join(m["roles"][:3]) if m.get("roles") else "No roles"
@@ -1031,7 +1168,6 @@ async def members_cmd(interaction: discord.Interaction):
             roles_str += f" +{len(m['roles']) - 3} more"
         joined = m["joined_at"].strftime("%b %d, %Y") if m.get("joined_at") else "?"
         lines.append(f"**{m['name']}** *(joined {joined})*\n╰ {roles_str}")
-
     pages = make_pages(lines, f"👥 {interaction.guild.name} — Members", per_page=8)
     view = PaginatorView(pages, interaction.user.id)
     await interaction.response.send_message(embed=pages[0], view=view)
@@ -1042,7 +1178,6 @@ async def activity_cmd(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
-
     guild_id = str(interaction.guild.id)
     recent = await asyncio.to_thread(
         lambda: list(messages_col.find({"guild_id": guild_id}).sort("timestamp", pymongo.DESCENDING).limit(50))
@@ -1050,12 +1185,7 @@ async def activity_cmd(interaction: discord.Interaction):
     if not recent:
         await interaction.response.send_message("❌ No message history yet.", ephemeral=True)
         return
-
-    lines = [
-        f"**#{m['channel']}** · {m['author']}\n╰ {m['content'][:80]}"
-        for m in reversed(recent)
-    ]
-
+    lines = [f"**#{m['channel']}** · {m['author']}\n╰ {m['content'][:80]}" for m in reversed(recent)]
     pages = make_pages(lines, f"📋 {interaction.guild.name} — Recent Activity", per_page=8)
     view = PaginatorView(pages, interaction.user.id)
     await interaction.response.send_message(embed=pages[0], view=view)
@@ -1066,17 +1196,14 @@ async def staff_cmd(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
-
     guild_id = str(interaction.guild.id)
     staff = await get_staff(guild_id)
-
     def fmt(role_key):
         uid = staff.get(role_key)
         name = staff.get(f"{role_key}_name", "Not set")
         if uid:
             return f"<@{uid}>\n╰ {name}"
         return "Not set"
-
     embed = discord.Embed(title=f"👥 {interaction.guild.name} — Staff", color=BOT_COLOR)
     embed.add_field(name="👑 Founder",      value=fmt("founder"),      inline=True)
     embed.add_field(name="🛡️ Owner",        value=fmt("owner"),        inline=True)
@@ -1087,32 +1214,22 @@ async def staff_cmd(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="setstaff", description="Set server staff roles (Admin only)")
-@app_commands.describe(
-    role="Role to set: founder, owner, admin, senior_admin",
-    member="The member to assign to this role"
-)
+@app_commands.describe(role="Role: founder, owner, admin, senior_admin", member="Member to assign")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setstaff(interaction: discord.Interaction, role: str, member: discord.Member):
     if not interaction.guild:
         await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
-
     role_key = role.lower().replace("-", "_")
-    valid_roles = ["founder", "owner", "admin", "senior_admin"]
-    if role_key not in valid_roles:
-        await interaction.response.send_message(
-            "❌ Invalid role. Choose from: `founder`, `owner`, `admin`, `senior_admin`",
-            ephemeral=True
-        )
+    if role_key not in ["founder", "owner", "admin", "senior_admin"]:
+        await interaction.response.send_message("❌ Invalid role. Choose from: `founder`, `owner`, `admin`, `senior_admin`", ephemeral=True)
         return
-
     await set_staff(str(interaction.guild.id), role_key, str(member.id), member.display_name)
-    role_display = role_key.replace("_", " ").title()
-    await interaction.response.send_message(f"✅ **{role_display}** set to {member.mention}!")
+    await interaction.response.send_message(f"✅ **{role_key.replace('_', ' ').title()}** set to {member.mention}!")
 
 
 @bot.tree.command(name="editinfo", description="Update server info (Admin only)")
-@app_commands.describe(key="Field to update e.g. server_ip, version, store, discord_invite", value="New value")
+@app_commands.describe(key="Field to update e.g. server_ip, version, store", value="New value")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def editinfo(interaction: discord.Interaction, key: str, value: str):
     if not interaction.guild:
