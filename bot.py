@@ -9,7 +9,7 @@ import requests
 import asyncio
 import os
 
-# ===== CONFIG â€” fill these in =====
+# ===== CONFIG =====
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 MONGO_URI     = os.environ["MONGO_URI"]
 DATABASE_NAME = os.environ.get("DATABASE_NAME", "auramc")
@@ -23,9 +23,8 @@ HISTORY_LIMIT = 25
 BOT_COLOR = discord.Color.from_str("#5865F2")
 
 # ===== CONVERSATION MEMORY =====
-# { channel_id: [ {role, content}, ... ] }
 conversation_history: dict = {}
-MAX_HISTORY = 10  # number of back-and-forth pairs to remember per channel
+MAX_HISTORY = 10
 
 # ===== MONGODB SETUP =====
 mongo_client = pymongo.MongoClient(MONGO_URI)
@@ -35,15 +34,62 @@ messages_col = db["messages"]
 members_col  = db["members"]
 roles_col    = db["roles"]
 channels_col = db["channels"]
+staff_col    = db["server_staff"]   # NEW: stores founder/owner/admin/senior-admin
+
+# ===== PLACEHOLDERS CONFIG =====
+# These are all the keys users can edit with !edit or !rem set
+PLACEHOLDERS = {
+    "server_ip":      "The Minecraft server IP address",
+    "version":        "The server Minecraft version (e.g. 1.21.11)",
+    "discord_link":   "The Discord invite link",
+    "rules_channel":  "Channel ID or name for server rules",
+    "store_link":     "Link to the server store",
+    "update":         "Latest update/patch notes",
+    "current":        "Current server status or announcement",
+    "owner":          "Server owner name or @mention",
+    "admins":         "List of admins",
+    "support":        "Support channel or contact info",
+    "server_name":    "The name of the server",
+    "discord_invite": "Discord invite link (alias for discord_link)",
+    "store":          "Store link (alias for store_link)",
+}
 
 # ===== IN-MEMORY PRESENCE CACHE =====
-# { guild_id: { display_name: "online"|"idle"|"dnd"|"offline" } }
 presence_cache: dict = {}
 
 # ==========================================================================
-# SYNC HELPERS â€” these are plain Python functions that do blocking I/O.
-# They must NEVER be called directly from async code.
-# Always call them via: await asyncio.to_thread(fn, args...)
+# STAFF HELPERS (NEW)
+# ==========================================================================
+
+def _get_staff(guild_id: str) -> dict:
+    """Returns dict like { 'founder': '123456789', 'owner': '987654321', ... }"""
+    doc = staff_col.find_one({"guild_id": guild_id})
+    if doc:
+        doc.pop("_id", None)
+        doc.pop("guild_id", None)
+        return doc
+    return {}
+
+def _set_staff(guild_id: str, role: str, user_id: str, display_name: str):
+    """Save a staff role (founder/owner/admin/senior-admin) to MongoDB."""
+    staff_col.update_one(
+        {"guild_id": guild_id},
+        {"$set": {
+            role: user_id,
+            f"{role}_name": display_name,
+            "updated_at": datetime.datetime.now(datetime.UTC)
+        }},
+        upsert=True
+    )
+
+async def get_staff(guild_id: str) -> dict:
+    return await asyncio.to_thread(_get_staff, guild_id)
+
+async def set_staff(guild_id: str, role: str, user_id: str, display_name: str):
+    await asyncio.to_thread(_set_staff, guild_id, role, user_id, display_name)
+
+# ==========================================================================
+# SYNC HELPERS
 # ==========================================================================
 
 def _get_state(guild_id: str) -> dict:
@@ -59,11 +105,19 @@ def _set_state(guild_id: str, key: str, value):
 
 def _seed_guild_defaults(guild_id: str, guild_name: str):
     defaults = {
-        "server_name": guild_name,
-        "server_ip": "N/A",
-        "version": "N/A",
+        "server_name":    guild_name,
+        "server_ip":      "N/A",
+        "version":        "N/A",
+        "discord_link":   "N/A",
         "discord_invite": "N/A",
-        "store": "N/A",
+        "rules_channel":  "N/A",
+        "store_link":     "N/A",
+        "store":          "N/A",
+        "update":         "N/A",
+        "current":        "N/A",
+        "owner":          "N/A",
+        "admins":         "N/A",
+        "support":        "N/A",
     }
     for key, value in defaults.items():
         if not state_col.find_one({"guild_id": guild_id, "key": key}):
@@ -71,7 +125,6 @@ def _seed_guild_defaults(guild_id: str, guild_name: str):
     print(f"âœ… Defaults seeded for guild: {guild_name} ({guild_id})")
 
 def _save_message(message):
-    """Save a message to MongoDB. Keeps only the last 500 per channel."""
     try:
         if not message.content or not message.guild:
             return
@@ -99,6 +152,7 @@ def _save_message(message):
 
 def _build_system_prompt(guild_id: str) -> str:
     state = _get_state(guild_id)
+    staff = _get_staff(guild_id)   # NEW: load staff from MongoDB
     guild_filter = {"guild_id": guild_id}
 
     recent_msgs = list(messages_col.find(guild_filter).sort("timestamp", pymongo.DESCENDING).limit(30))
@@ -139,6 +193,14 @@ def _build_system_prompt(guild_id: str) -> str:
     dnd    = [n for n, s in statuses.items() if s == "dnd"]
     active_count = len(online) + len(idle) + len(dnd)
 
+    # NEW: Build staff section
+    def staff_mention(role_key):
+        uid = staff.get(role_key)
+        name = staff.get(f"{role_key}_name", "Not set")
+        if uid and uid != "Not set":
+            return f"<@{uid}> ({name})"
+        return "Not set"
+
     return f"""You are Rem, the official AI assistant for the {server_name} Discord server.
 You are helpful, friendly, and always up to date with real-time server data.
 Your name is Rem. Never refer to yourself by any other name.
@@ -150,12 +212,24 @@ You have memory of the current conversation â€” stay on topic and refer bac
 - Server Name: {server_name}
 - Server IP: {state.get('server_ip', 'N/A')}
 - Version: {state.get('version', 'N/A')}
-- Discord Invite: {state.get('discord_invite', 'N/A')}
-- Store: {state.get('store', 'N/A')}
+- Discord Link: {state.get('discord_link', state.get('discord_invite', 'N/A'))}
+- Rules Channel: {state.get('rules_channel', 'N/A')}
+- Store: {state.get('store_link', state.get('store', 'N/A'))}
+- Latest Update: {state.get('update', 'N/A')}
+- Current Status: {state.get('current', 'N/A')}
+- Owner: {state.get('owner', 'N/A')}
+- Admins: {state.get('admins', 'N/A')}
+- Support: {state.get('support', 'N/A')}
 - Total Members: {state.get('total_members', '?')}
 - Online Right Now: {active_count} active ({len(online)} online, {len(idle)} idle, {len(dnd)} do not disturb)
 - Total Channels: {state.get('total_channels', '?')}
 - Total Roles: {state.get('total_roles', '?')}
+
+=== SERVER STAFF ===
+- Founder: {staff_mention('founder')}
+- Owner: {staff_mention('owner')}
+- Admin: {staff_mention('admin')}
+- Senior Admin: {staff_mention('senior_admin')}
 
 === WHO IS ONLINE RIGHT NOW ===
 - Online: {', '.join(online[:20]) or 'none'}
@@ -198,7 +272,6 @@ def _ask_groq(prompt: str, guild_id: str, history: list) -> str:
         return f"âš ï¸ Error: {e}"
 
 def _sync_server_data(guild):
-    """Full sync of members/roles/channels for a guild. Runs in a thread."""
     try:
         guild_id = str(guild.id)
 
@@ -272,7 +345,6 @@ async def ask_groq(prompt: str, guild_id: str, history: list) -> str:
     return await asyncio.to_thread(_ask_groq, prompt, guild_id, history)
 
 async def fetch_channel_history(guild):
-    """Fetches message history for all channels in a guild on startup."""
     print(f"ðŸ“– Fetching message history for {guild.name}...")
     for channel in guild.text_channels:
         if channel.name in IGNORE_CHANNELS:
@@ -297,7 +369,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==========================================================================
-# AI REPLY HANDLER (shared by !rem, @Rem mention, and /rem slash command)
+# AI REPLY HANDLER
 # ==========================================================================
 
 async def handle_ai_message(message, question: str):
@@ -309,6 +381,18 @@ async def handle_ai_message(message, question: str):
 
     channel_id = str(message.channel.id)
     guild_id = str(message.guild.id)
+
+    # NEW: Check if this is a set staff command e.g. !rem set founder @user
+    parts = question.strip().split()
+    if len(parts) >= 3 and parts[0].lower() == "set":
+        role_key = parts[1].lower().replace("-", "_")  # senior-admin -> senior_admin
+        valid_roles = ["founder", "owner", "admin", "senior_admin"]
+        if role_key in valid_roles and message.mentions:
+            member = message.mentions[0]
+            await set_staff(guild_id, role_key, str(member.id), member.display_name)
+            role_display = role_key.replace("_", " ").title()
+            await message.reply(f"âœ… **{role_display}** has been set to {member.mention} and saved to database!")
+            return
 
     if channel_id not in conversation_history:
         conversation_history[channel_id] = []
@@ -378,13 +462,49 @@ async def on_message(message):
     if message.channel.name not in IGNORE_CHANNELS and message.content:
         await save_message(message)
 
+    content = message.content.strip()
+    content_lower = content.lower()
+
+    # â”€â”€ !placeholders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if content_lower == "!placeholders":
+        lines = "\n".join(f"â€¢ `{k}` â€” {v}" for k, v in PLACEHOLDERS.items())
+        embed = discord.Embed(
+            title="ðŸ“‹ Available Config Placeholders",
+            description=f"You can edit these using `!edit <key> <value>`\n\n{lines}",
+            color=BOT_COLOR
+        )
+        embed.set_footer(text=f"Requested by {message.author.display_name}")
+        await message.reply(embed=embed)
+        return
+
+    # â”€â”€ !edit <key> <value> â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if content_lower.startswith("!edit "):
+        parts = content[6:].strip().split(" ", 1)
+        if len(parts) < 2:
+            await message.reply("âŒ Usage: `!edit <key> <value>`\nRun `!placeholders` to see available keys.")
+            return
+        key, value = parts[0].lower(), parts[1]
+        if key not in PLACEHOLDERS:
+            await message.reply(f"âŒ Unknown key `{key}`. Run `!placeholders` to see valid keys.")
+            return
+        guild_id = str(message.guild.id)
+        await set_state(guild_id, key, value)
+        embed = discord.Embed(
+            description=f"âœ… Updated **{key}** to: `{value}`",
+            color=discord.Color.green()
+        )
+        await message.reply(embed=embed)
+        return
+
+    # â”€â”€ @Rem mention â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if bot.user in message.mentions:
         question = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
         await handle_ai_message(message, question)
         return
 
-    if message.content.lower().startswith("!rem"):
-        question = message.content[4:].strip()
+    # â”€â”€ !rem â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if content_lower.startswith("!rem"):
+        question = content[4:].strip()
         await handle_ai_message(message, question)
         return
 
@@ -487,7 +607,7 @@ async def on_presence_update(before, after):
 
 
 # ==========================================================================
-# BACKGROUND TASK â€” full sync every 10 minutes
+# BACKGROUND TASK
 # ==========================================================================
 
 @tasks.loop(minutes=10)
@@ -534,6 +654,59 @@ async def rem_cmd(interaction: discord.Interaction, question: str):
     embed.set_author(name="Rem", icon_url=bot.user.display_avatar.url if bot.user.display_avatar else None)
     embed.set_footer(text=f"Asked by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
     await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="setstaff", description="Set server staff roles (Admin only)")
+@app_commands.describe(
+    role="Role to set: founder, owner, admin, senior_admin",
+    member="The member to assign to this role"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setstaff(interaction: discord.Interaction, role: str, member: discord.Member):
+    """Slash command to set staff roles â€” saves permanently to MongoDB."""
+    if not interaction.guild:
+        await interaction.response.send_message("âš ï¸ This command only works inside a server.", ephemeral=True)
+        return
+
+    role_key = role.lower().replace("-", "_")
+    valid_roles = ["founder", "owner", "admin", "senior_admin"]
+    if role_key not in valid_roles:
+        await interaction.response.send_message(
+            f"âŒ Invalid role. Choose from: `founder`, `owner`, `admin`, `senior_admin`",
+            ephemeral=True
+        )
+        return
+
+    await set_staff(str(interaction.guild.id), role_key, str(member.id), member.display_name)
+    role_display = role_key.replace("_", " ").title()
+    await interaction.response.send_message(f"âœ… **{role_display}** set to {member.mention} and saved!", ephemeral=False)
+
+
+@bot.tree.command(name="staff", description="Show current server staff")
+async def staff_cmd(interaction: discord.Interaction):
+    """Show who is set as founder/owner/admin/senior-admin."""
+    if not interaction.guild:
+        await interaction.response.send_message("âš ï¸ This command only works inside a server.", ephemeral=True)
+        return
+
+    guild_id = str(interaction.guild.id)
+    staff = await get_staff(guild_id)
+
+    embed = discord.Embed(title=f"ðŸ‘¥ {interaction.guild.name} â€” Staff", color=BOT_COLOR)
+
+    def fmt(role_key):
+        uid = staff.get(role_key)
+        name = staff.get(f"{role_key}_name", "Not set")
+        if uid:
+            return f"<@{uid}> ({name})"
+        return "Not set"
+
+    embed.add_field(name="ðŸ‘‘ Founder",      value=fmt("founder"),      inline=False)
+    embed.add_field(name="ðŸ›¡ï¸ Owner",        value=fmt("owner"),        inline=False)
+    embed.add_field(name="âš™ï¸ Admin",        value=fmt("admin"),        inline=False)
+    embed.add_field(name="ðŸ”° Senior Admin", value=fmt("senior_admin"), inline=False)
+    embed.set_footer(text=f"Use /setstaff or !rem set founder @user to update")
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="serverinfo", description="Show live server info")
