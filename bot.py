@@ -35,8 +35,8 @@ messages_col = db["messages"]
 members_col  = db["members"]
 roles_col    = db["roles"]
 channels_col = db["channels"]
-staff_col    = db["server_staff"]   # stores founder/owner/admin/senior-admin
-config_col   = db["bot_config"]     # stores global bot settings like developer name
+staff_col    = db["server_staff"]
+config_col   = db["bot_config"]
 
 # ===== BOT CONFIG HELPERS =====
 def _get_bot_config(key: str, default: str = "") -> str:
@@ -58,7 +58,6 @@ async def set_bot_config(key: str, value: str):
     await asyncio.to_thread(_set_bot_config, key, value)
 
 # ===== PLACEHOLDERS CONFIG =====
-# These are all the keys users can edit with !edit or !rem set
 PLACEHOLDERS = {
     "server_ip":      "The Minecraft server IP address",
     "version":        "The server Minecraft version (e.g. 1.21.11)",
@@ -79,11 +78,10 @@ PLACEHOLDERS = {
 presence_cache: dict = {}
 
 # ==========================================================================
-# STAFF HELPERS (NEW)
+# STAFF HELPERS
 # ==========================================================================
 
 def _get_staff(guild_id: str) -> dict:
-    """Returns dict like { 'founder': '123456789', 'owner': '987654321', ... }"""
     doc = staff_col.find_one({"guild_id": guild_id})
     if doc:
         doc.pop("_id", None)
@@ -92,7 +90,6 @@ def _get_staff(guild_id: str) -> dict:
     return {}
 
 def _set_staff(guild_id: str, role: str, user_id: str, display_name: str):
-    """Save a staff role (founder/owner/admin/senior-admin) to MongoDB."""
     staff_col.update_one(
         {"guild_id": guild_id},
         {"$set": {
@@ -173,7 +170,7 @@ def _save_message(message):
 
 def _build_system_prompt(guild_id: str) -> str:
     state = _get_state(guild_id)
-    staff = _get_staff(guild_id)   # NEW: load staff from MongoDB
+    staff = _get_staff(guild_id)
     guild_filter = {"guild_id": guild_id}
 
     recent_msgs = list(messages_col.find(guild_filter).sort("timestamp", pymongo.DESCENDING).limit(30))
@@ -194,15 +191,18 @@ def _build_system_prompt(guild_id: str) -> str:
         for m in reversed(recent_msgs[:15])
     ) or "  None."
 
+    # ✅ FIX: Removed [:15] limit — now sends ALL roles to the AI
     roles = list(roles_col.find(guild_filter).sort("member_count", pymongo.DESCENDING))
     roles_text = "\n".join(
         f"  {r['name']} ({r['member_count']} members): {', '.join(r['members'][:10]) or 'none'}"
-        for r in roles[:15]
+        for r in roles  # was roles[:15]
     ) or "  None."
 
+    # ✅ FIX: Removed [:20] limit — now sends ALL channels to the AI
     channels = list(channels_col.find({**guild_filter, "type": "text"}))
-    channels_text = ", ".join(
-        f"#{c['name']} (<#{c['channel_id']}>)" for c in channels[:20]
+    channels_text = "\n".join(
+        f"  #{c['name']} (<#{c['channel_id']}>) [category: {c.get('category', 'None')}]"
+        for c in channels  # was channels[:20]
     ) or "None"
 
     server_name = state.get("server_name", "this server")
@@ -214,7 +214,6 @@ def _build_system_prompt(guild_id: str) -> str:
     dnd    = [n for n, s in statuses.items() if s == "dnd"]
     active_count = len(online) + len(idle) + len(dnd)
 
-    # NEW: Build staff section
     def staff_mention(role_key):
         uid = staff.get(role_key)
         name = staff.get(f"{role_key}_name", "Not set")
@@ -231,6 +230,10 @@ You have memory of the current conversation — stay on topic and refer back to 
 IMPORTANT: If anyone asks about your commands, tell them to use `!rem help` or `!rem list all` to see the real command list. Never make up or guess commands.
 You were developed by {_get_bot_config('developer_name', 'Sam (Sam | Dev | Sleepwalker)')}. If anyone asks who made you, who developed you, or who is your creator, always say their name.
 
+CRITICAL: You have been given the COMPLETE list of ALL {len(channels)} text channels and ALL {len(roles)} roles below.
+Do NOT say you need to fetch more data. Do NOT say the list is incomplete. Everything is already provided.
+If asked to list all channels or roles, list every single one shown below — do not skip any or say there are more.
+
 === SERVER INFO ===
 - Server Name: {server_name}
 - Server IP: {state.get('server_ip', 'N/A')}
@@ -245,8 +248,8 @@ You were developed by {_get_bot_config('developer_name', 'Sam (Sam | Dev | Sleep
 - Support: {state.get('support', 'N/A')}
 - Total Members: {state.get('total_members', '?')}
 - Online Right Now: {active_count} active ({len(online)} online, {len(idle)} idle, {len(dnd)} do not disturb)
-- Total Channels: {state.get('total_channels', '?')}
-- Total Roles: {state.get('total_roles', '?')}
+- Total Text Channels: {len(channels)}
+- Total Roles: {len(roles)}
 
 === SERVER STAFF ===
 - Founder: {staff_mention('founder')}
@@ -259,10 +262,10 @@ You were developed by {_get_bot_config('developer_name', 'Sam (Sam | Dev | Sleep
 - Idle: {', '.join(idle[:20]) or 'none'}
 - Do Not Disturb: {', '.join(dnd[:20]) or 'none'}
 
-=== TEXT CHANNELS (use these IDs for mentions) ===
+=== ALL TEXT CHANNELS ({len(channels)} total — this is the complete list) ===
 {channels_text}
 
-=== ROLES & WHO HAS THEM ===
+=== ALL ROLES ({len(roles)} total — this is the complete list) ===
 {roles_text}
 
 === LAST MESSAGE IN EACH CHANNEL ===
@@ -405,10 +408,9 @@ async def handle_ai_message(message, question: str):
     channel_id = str(message.channel.id)
     guild_id = str(message.guild.id)
 
-    # NEW: Check if this is a set staff command e.g. !rem set founder @user
     parts = question.strip().split()
     if len(parts) >= 3 and parts[0].lower() == "set":
-        role_key = parts[1].lower().replace("-", "_")  # senior-admin -> senior_admin
+        role_key = parts[1].lower().replace("-", "_")
         valid_roles = ["founder", "owner", "admin", "senior_admin"]
         if role_key in valid_roles and message.mentions:
             member = message.mentions[0]
@@ -476,7 +478,6 @@ async def on_ready():
     if not full_sync.is_running():
         full_sync.start()
 
-    # ── Send restart complete message if bot was restarted ─────────────────
     restart_channel_id = await get_bot_config("restart_channel_id")
     restart_guild_id   = await get_bot_config("restart_guild_id")
     if restart_channel_id and restart_guild_id:
@@ -492,7 +493,6 @@ async def on_ready():
                     await channel.send(embed=embed)
         except Exception as e:
             print(f"❌ Could not send restart message: {e}")
-        # Clear so it doesn't send again on next normal startup
         await set_bot_config("restart_channel_id", "")
         await set_bot_config("restart_guild_id", "")
 
@@ -508,7 +508,6 @@ async def on_message(message):
     content = message.content.strip()
     content_lower = content.lower()
 
-    # ── !sync (developer only) ─────────────────────────────────────────────
     if content_lower == "!sync":
         if message.author.id != DEVELOPER_ID:
             await message.reply("❌ You don't have permission to use this command.")
@@ -517,10 +516,8 @@ async def on_message(message):
         embed = discord.Embed(description="🔄 Syncing members, roles & channels...", color=BOT_COLOR)
         msg = await message.reply(embed=embed)
         try:
-            # Step 1 — sync members/roles/channels
             await sync_server_data(message.guild)
 
-            # Step 2 — refresh presence cache
             for member in message.guild.members:
                 if not member.bot:
                     if guild_id not in presence_cache:
@@ -529,7 +526,6 @@ async def on_message(message):
 
             online = sum(1 for s in presence_cache.get(guild_id, {}).values() if s == "online")
 
-            # Step 3 — update message to show done
             embed = discord.Embed(title="✅ Sync Complete!", color=discord.Color.green())
             embed.add_field(name="👥 Members",  value=str(message.guild.member_count), inline=True)
             embed.add_field(name="🏷️ Roles",   value=str(len(message.guild.roles) - 1), inline=True)
@@ -538,7 +534,6 @@ async def on_message(message):
             embed.set_footer(text=f"Synced by {message.author.display_name}")
             await msg.edit(embed=embed)
 
-            # Step 4 — fetch message history in background (non-blocking)
             asyncio.create_task(fetch_channel_history(message.guild))
 
         except Exception as e:
@@ -546,7 +541,6 @@ async def on_message(message):
             await msg.edit(embed=embed)
         return
 
-    # ── !rem setdev <name> (developer only) ───────────────────────────────
     if content_lower.startswith("!rem setdev "):
         if message.author.id != DEVELOPER_ID:
             await message.reply("❌ Only the bot developer can use this command.")
@@ -563,7 +557,6 @@ async def on_message(message):
         await message.reply(embed=embed)
         return
 
-    # ── !placeholders ──────────────────────────────────────────────────────
     if content_lower == "!placeholders":
         lines = "\n".join(f"• `{k}` — {v}" for k, v in PLACEHOLDERS.items())
         embed = discord.Embed(
@@ -575,7 +568,6 @@ async def on_message(message):
         await message.reply(embed=embed)
         return
 
-    # ── !edit <key> <value> ────────────────────────────────────────────────
     if content_lower.startswith("!edit "):
         parts = content[6:].strip().split(" ", 1)
         if len(parts) < 2:
@@ -594,7 +586,6 @@ async def on_message(message):
         await message.reply(embed=embed)
         return
 
-    # ── !rem help / !rem list / !rem list all ─────────────────────────────
     if content_lower in ("!rem help", "!rem list", "!rem list all", "!rem commands"):
         embed = discord.Embed(
             title="📋 Rem — All Commands",
@@ -617,7 +608,7 @@ async def on_message(message):
         embed.add_field(name="📊 Slash Commands", value=(
             "`/rem` — Ask Rem a question\n"
             "`/serverinfo` — Show live server info\n"
-            "`/staff` — Show current staff list\n"
+            "`/staff` — Show current server staff\n"
             "`/roles` — Show all roles & members\n"
             "`/members` — Show recent members\n"
             "`/activity` — Show recent chat activity\n"
@@ -633,13 +624,11 @@ async def on_message(message):
         await message.reply(embed=embed)
         return
 
-    # ── @Rem mention ───────────────────────────────────────────────────────
     if bot.user in message.mentions:
         question = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
         await handle_ai_message(message, question)
         return
 
-    # ── !rem ───────────────────────────────────────────────────────────────
     if content_lower.startswith("!rem"):
         question = content[4:].strip()
         await handle_ai_message(message, question)
@@ -745,7 +734,6 @@ async def on_presence_update(before, after):
 
 @bot.event
 async def on_guild_role_create(role):
-    """Sync roles when a new role is created."""
     if role.name == "@everyone":
         return
     guild_id = str(role.guild.id)
@@ -762,7 +750,6 @@ async def on_guild_role_create(role):
 
 @bot.event
 async def on_guild_role_delete(role):
-    """Remove role from DB when deleted."""
     guild_id = str(role.guild.id)
     await asyncio.to_thread(roles_col.delete_one, {"name": role.name, "guild_id": guild_id})
     await set_state(guild_id, "total_roles", str(len(role.guild.roles) - 1))
@@ -771,10 +758,8 @@ async def on_guild_role_delete(role):
 
 @bot.event
 async def on_guild_role_update(before, after):
-    """Sync role when it's renamed or members change."""
     guild_id = str(after.guild.id)
     role_members = [m.display_name for m in after.members if not m.bot]
-    # If renamed, delete old entry
     if before.name != after.name:
         await asyncio.to_thread(roles_col.delete_one, {"name": before.name, "guild_id": guild_id})
     await asyncio.to_thread(roles_col.update_one,
@@ -842,7 +827,6 @@ async def rem_cmd(interaction: discord.Interaction, question: str):
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setstaff(interaction: discord.Interaction, role: str, member: discord.Member):
-    """Slash command to set staff roles — saves permanently to MongoDB."""
     if not interaction.guild:
         await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
@@ -863,7 +847,6 @@ async def setstaff(interaction: discord.Interaction, role: str, member: discord.
 
 @bot.tree.command(name="staff", description="Show current server staff")
 async def staff_cmd(interaction: discord.Interaction):
-    """Show who is set as founder/owner/admin/senior-admin."""
     if not interaction.guild:
         await interaction.response.send_message("⚠️ This command only works inside a server.", ephemeral=True)
         return
@@ -937,7 +920,7 @@ async def roles_cmd(interaction: discord.Interaction):
         return
 
     embed = discord.Embed(title=f"🏷️ {interaction.guild.name} Roles", color=BOT_COLOR)
-    for r in roles[:15]:
+    for r in roles[:25]:  # Discord embed field limit is 25
         names = ", ".join(r["members"][:8]) or "No members"
         if r["member_count"] > 8:
             names += f" +{r['member_count'] - 8} more"
