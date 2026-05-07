@@ -508,18 +508,43 @@ async def on_message(message):
     content = message.content.strip()
     content_lower = content.lower()
 
-    # ── !restart (developer only) ──────────────────────────────────────────
-    if content_lower == "!restart":
+    # ── !sync (developer only) ─────────────────────────────────────────────
+    if content_lower == "!sync":
         if message.author.id != DEVELOPER_ID:
             await message.reply("❌ You don't have permission to use this command.")
             return
-        # Save channel info so bot can send "back online" message after restart
-        await set_bot_config("restart_channel_id", str(message.channel.id))
-        await set_bot_config("restart_guild_id", str(message.guild.id))
-        await message.reply("🔄 Restarting... I'll be back in a few seconds!")
-        print(f"🔄 Restart triggered by {message.author} ({message.author.id})")
-        await asyncio.sleep(1)  # give time for the reply to send
-        os._exit(0)  # force exit so Railway restarts the process
+        guild_id = str(message.guild.id)
+        embed = discord.Embed(
+            description="🔄 Syncing all server data... please wait.",
+            color=BOT_COLOR
+        )
+        msg = await message.reply(embed=embed)
+        try:
+            await sync_server_data(message.guild)
+            await fetch_channel_history(message.guild)
+            # Re-seed presence cache
+            for member in message.guild.members:
+                if not member.bot:
+                    if guild_id not in presence_cache:
+                        presence_cache[guild_id] = {}
+                    presence_cache[guild_id][member.display_name] = str(member.status)
+            embed = discord.Embed(
+                title="✅ Sync Complete!",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="👥 Members", value=str(message.guild.member_count), inline=True)
+            embed.add_field(name="🏷️ Roles", value=str(len(message.guild.roles) - 1), inline=True)
+            embed.add_field(name="💬 Channels", value=str(len(message.guild.channels)), inline=True)
+            online = sum(1 for s in presence_cache.get(guild_id, {}).values() if s == "online")
+            embed.add_field(name="🟢 Online", value=str(online), inline=True)
+            embed.set_footer(text=f"Synced by {message.author.display_name}")
+            await msg.edit(embed=embed)
+        except Exception as e:
+            embed = discord.Embed(
+                description=f"❌ Sync failed: {e}",
+                color=discord.Color.red()
+            )
+            await msg.edit(embed=embed)
         return
 
     # ── !rem setdev <name> (developer only) ───────────────────────────────
@@ -602,7 +627,7 @@ async def on_message(message):
         ), inline=False)
         if message.author.id == DEVELOPER_ID:
             embed.add_field(name="🔧 Developer Only", value=(
-                "`!restart` — Restart the bot\n"
+                "`!sync` — Force sync all members, roles & channels\n"
                 "`!rem setdev <name>` — Change the developer name"
             ), inline=False)
         embed.set_footer(text=f"Requested by {message.author.display_name}")
