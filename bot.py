@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 load_dotenv()
+print("GROQ KEY:", os.environ.get("GROQ_API_KEY", "NOT FOUND"))
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
