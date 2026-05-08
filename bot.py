@@ -675,9 +675,13 @@ async def on_message(message):
     if message.author.bot or not message.guild:
         return
 
-    if message.channel.name not in IGNORE_CHANNELS and message.content:
-        await save_message(message)
-
+    if message.channel.name not in IGNORE_CHANNELS and message.content \
+        and not message.content.lower().startswith("!rem") \
+        and not message.content.lower().startswith("!master") \
+        and not message.content.lower().startswith("!sync") \
+        and not message.content.lower().startswith("!edit") \
+        and not message.content.lower().startswith("!placeholders"):
+        
     content = message.content.strip()
     content_lower = content.lower()
 
