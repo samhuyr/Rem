@@ -681,9 +681,7 @@ async def on_message(message):
         and not message.content.lower().startswith("!sync") \
         and not message.content.lower().startswith("!edit") \
         and not message.content.lower().startswith("!placeholders"):
-        
-    content = message.content.strip()
-    content_lower = content.lower()
+       
 
     # ── !master (Sam only) ─────────────────────────────────────────────────
     if content_lower.startswith(MASTER_PREFIX):
